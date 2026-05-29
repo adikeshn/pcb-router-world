@@ -212,7 +212,7 @@ class TPPlacementEnv(gym.Env):
             # Length matching
             if len(finite) > 1:
                 spread = (max(finite) - min(finite)) / max(np.mean(finite), 1e-6)
-                reward -= 20.0 * spread
+                reward -= 80.0 * spread
 
         # TP spacing quality
         if len(self.placed_tps) > 1:
