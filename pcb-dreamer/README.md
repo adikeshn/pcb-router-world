@@ -373,3 +373,80 @@ All prior work assumes fixed endpoints (component placement with known netlists,
 | Scaling to 20 traces fails | Medium | Board decomposition (Dummy Pad DRL approach); or present 8-trace results as proof of concept |
 | Post-hoc meandering infeasible for some layouts | Low | Soft length-spread constraint steers away from these; increase penalty weight λ |
 | Colab disconnects mid-training | High | Checkpoint to Google Drive every eval cycle; auto-resume |
+
+---
+
+## 15. Training, Evaluation & Run Tracking
+
+This section documents the tooling for running, evaluating, and comparing
+training runs (as opposed to the conceptual design above).
+
+### Named configs
+
+`configs.yaml` includes, in addition to `defaults`/`debug`:
+
+| Config | Purpose | Steps | Notes |
+|---|---|---|---|
+| `smoke` | Confirm the pipeline runs after a code change | 1,500 | Same architecture as `defaults`, tiny budget |
+| `fast_iter` | "Did this change move the needle?" | 10,000 | A few eval cycles, small board recommended |
+| `standard` | Real before/after comparison runs | 100,000 | |
+| `large` | Final runs | 500,000 | Video prediction logging enabled |
+
+Any budget knob (`--steps`, `--prefill`, `--eval_every`, `--eval_episode_num`,
+`--log_every`) can also be overridden directly on the command line without
+editing `configs.yaml`, e.g.:
+
+```bash
+python train.py --configs defaults fast_iter --num_traces 4 --steps 20000
+```
+
+### Run naming & metadata
+
+If `--logdir` isn't given, each run gets an auto-generated directory under
+`./logdir/`, named from the configs used, trace count, seed, short git
+commit hash, and a timestamp, e.g.:
+
+```
+logdir/defaults-fast_iter_t4_s0_553b161_20260612-205039/
+```
+
+Each run directory contains `meta.json` (configs used, git commit, full
+resolved config) and `metrics.jsonl` (one line per logged step, written by
+`tools.Logger`). Because the commit hash is embedded, any run can be traced
+back to the exact code that produced it — important once you start comparing
+"before fix" vs "after fix" runs across multiple sessions.
+
+### Per-episode diagnostics
+
+In addition to `train_return`/`eval_return`, every episode now logs (as
+`train_log_*` / `eval_log_*` scalars, averaged across eval episodes):
+
+- `log_failures`, `log_routable` — A* routing outcome
+- `log_total_length`, `log_length_spread`, `log_min_tp_spacing` — geometry
+- `log_invalid_actions` — count of masked/invalid placements chosen per episode
+- `log_reward_routability`, `log_reward_length`, `log_reward_spread`,
+  `log_reward_spacing` — terminal reward broken down by term
+
+These let you see *which* part of the reward or environment behavior is
+changing, rather than just the aggregate return.
+
+### Evaluating a checkpoint
+
+```bash
+python evaluate_checkpoint.py --logdir logdir/<run_name> --episodes 10
+```
+
+Runs deterministic eval episodes, reports the diagnostics above, renders
+board layouts (`eval_report/episode_*.png`) for a few episodes, and compares
+against the non-learned `eval.py` baselines (random/greedy/spread) on the
+same board configuration. Writes `eval_report/summary.json`.
+
+### Comparing runs
+
+```bash
+python compare_runs.py --plot eval_return eval_log_routable eval_log_length_spread
+```
+
+Scans `./logdir/*/` for `meta.json` + `metrics.jsonl`, prints a summary table
+of the latest eval metrics per run, and (with `--plot`) saves overlay plots
+to `logdir/comparison_plots/`.

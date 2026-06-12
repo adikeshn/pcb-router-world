@@ -206,12 +206,11 @@ def simulate(
                 ep_length = len(cache[envs[i].id]["reward"]) - 1
                 score = float(np.array(cache[envs[i].id]["reward"]).sum())
                 video = cache[envs[i].id].get("image", [np.zeros((4,4,3), dtype=np.uint8)])
-                # record logs given from environments
+                # collect per-episode sums of any env-provided `log_*` keys
+                episode_logs = {}
                 for key in list(cache[envs[i].id].keys()):
                     if "log_" in key:
-                        logger.scalar(
-                            key, float(np.array(cache[envs[i].id][key]).sum())
-                        )
+                        episode_logs[key] = float(np.array(cache[envs[i].id][key]).sum())
                         # log items won't be used later
                         cache[envs[i].id].pop(key)
 
@@ -221,15 +220,20 @@ def simulate(
                     logger.scalar(f"train_return", score)
                     logger.scalar(f"train_length", ep_length)
                     logger.scalar(f"train_episodes", len(cache))
+                    for key, value in episode_logs.items():
+                        logger.scalar("train_" + key, value)
                     logger.write(step=logger.step)
                 else:
                     if not "eval_lengths" in locals():
                         eval_lengths = []
                         eval_scores = []
+                        eval_logs = {}
                         eval_done = False
                     # start counting scores for evaluation
                     eval_scores.append(score)
                     eval_lengths.append(ep_length)
+                    for key, value in episode_logs.items():
+                        eval_logs.setdefault(key, []).append(value)
 
                     avg_score = sum(eval_scores) / len(eval_scores)
                     avg_length = sum(eval_lengths) / len(eval_lengths)
@@ -239,6 +243,8 @@ def simulate(
                         logger.scalar(f"eval_return", avg_score)
                         logger.scalar(f"eval_length", avg_length)
                         logger.scalar(f"eval_episodes", len(eval_scores))
+                        for key, values in eval_logs.items():
+                            logger.scalar("eval_" + key, sum(values) / len(values))
                         logger.write(step=logger.step)
                         eval_done = True
     if is_eval:

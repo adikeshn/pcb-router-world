@@ -93,3 +93,42 @@ debug:
   eval_episode_num: 2
   log_every: 100
   video_pred_log: False
+
+# Smoke test: confirms the pipeline runs end-to-end after a code change.
+# Same architecture/batch dims as `defaults`, just a tiny step budget.
+smoke:
+  steps: 1500
+  prefill: 200
+  eval_every: 500
+  eval_episode_num: 2
+  log_every: 100
+  video_pred_log: False
+
+# Fast iteration: enough steps to see a trend across several eval cycles
+# without a long wait. Good for "did this change move the needle" checks.
+fast_iter:
+  steps: 10000
+  prefill: 500
+  eval_every: 1000
+  eval_episode_num: 5
+  log_every: 500
+  video_pred_log: False
+
+# Standard run: real comparison runs (e.g. before/after a fix).
+standard:
+  steps: 100000
+  prefill: 2000
+  eval_every: 5000
+  eval_episode_num: 10
+  log_every: 1000
+  video_pred_log: False
+
+# Large run: final/longer runs, with video prediction logging enabled
+# for qualitative inspection.
+large:
+  steps: 500000
+  prefill: 5000
+  eval_every: 10000
+  eval_episode_num: 10
+  log_every: 2000
+  video_pred_log: True

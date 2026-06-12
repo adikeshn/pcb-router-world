@@ -76,9 +76,13 @@ class TPPlacementEnv(gym.Env):
         # Mask out padding entries
         self.candidate_mask[self._real_count:] = False
 
+        # Episode-level diagnostics
+        self._episode_invalid_actions = 0
+
         # Filled after validation
         self.routed_paths = None
         self.routed_lengths = None
+        self._terminal_metrics = {}
 
     # ---- coordinate / drawing helpers ----
 
@@ -168,7 +172,7 @@ class TPPlacementEnv(gym.Env):
     # ---- validation (runs after all TPs placed) ----
 
     def _validate(self) -> float:
-        """Route all traces and compute reward."""
+        """Route all traces, compute reward, and record diagnostic metrics."""
         if self.use_freerouting:
             try:
                 from envs.freerouting import route_with_freerouting
@@ -195,35 +199,49 @@ class TPPlacementEnv(gym.Env):
         self.routed_paths = paths
         self.routed_lengths = lengths
 
-        reward = 0.0
-
         # Routability
         if failures == 0:
-            reward += 15.0
+            reward_routability = 15.0
         else:
-            reward -= 10.0 * failures
+            reward_routability = -10.0 * failures
 
-        # Trace lengths
+        # Trace lengths / length matching
         finite = [l for l in lengths if l < float('inf')]
+        total_length = sum(finite) if finite else 0.0
+        spread = 0.0
+        reward_length = 0.0
+        reward_spread = 0.0
         if finite:
             diag = np.hypot(self.board.width, self.board.height)
-            # Minimize total length
-            reward -= 5.0 * sum(finite) / (len(finite) * diag)
-            # Length matching
+            reward_length = -5.0 * sum(finite) / (len(finite) * diag)
             if len(finite) > 1:
                 spread = (max(finite) - min(finite)) / max(np.mean(finite), 1e-6)
-                reward -= 80.0 * spread
+                reward_spread = -20.0 * spread
 
         # TP spacing quality
+        min_sp = 0.0
+        reward_spacing = 0.0
         if len(self.placed_tps) > 1:
             min_sp = min(
                 np.hypot(a[0] - b[0], a[1] - b[1])
                 for i, a in enumerate(self.placed_tps)
                 for b in self.placed_tps[i + 1:]
             )
-            reward += 2.0 * min(min_sp / TP_TO_TP_MIN, 2.0)
+            reward_spacing = 2.0 * min(min_sp / TP_TO_TP_MIN, 2.0)
 
-        return reward
+        self._terminal_metrics = {
+            "failures": failures,
+            "routable": 1.0 if failures == 0 else 0.0,
+            "total_length": total_length,
+            "length_spread": spread,
+            "min_tp_spacing": min_sp,
+            "reward_routability": reward_routability,
+            "reward_length": reward_length,
+            "reward_spread": reward_spread,
+            "reward_spacing": reward_spacing,
+        }
+
+        return reward_routability + reward_length + reward_spread + reward_spacing
 
     # ---- gym interface ----
 
@@ -233,8 +251,10 @@ class TPPlacementEnv(gym.Env):
         self.current_trace = 0
         self.candidate_mask = np.ones(self.num_candidates, dtype=bool)
         self.candidate_mask[self._real_count:] = False  # mask padding
+        self._episode_invalid_actions = 0
         self.routed_paths = None
         self.routed_lengths = None
+        self._terminal_metrics = {}
         return self._render_obs(), self._get_info()
 
     def step(self, action: int):
@@ -242,12 +262,18 @@ class TPPlacementEnv(gym.Env):
         reward = 0.0
 
         # Per-step reward
+        invalid_this_step = False
         if not self.candidate_mask[action]:
             reward -= 2.0
+            invalid_this_step = True
         elif check_tp_spacing(self.placed_tps, tp_x, tp_y):
             reward += 1.0
         else:
             reward -= 2.0
+            invalid_this_step = True
+
+        if invalid_this_step:
+            self._episode_invalid_actions += 1
 
         self.placed_tps.append((tp_x, tp_y))
         self.current_trace += 1
@@ -262,18 +288,18 @@ class TPPlacementEnv(gym.Env):
         if terminated:
             reward += self._validate()
 
-        return self._render_obs(), reward, terminated, False, self._get_info()
+        return self._render_obs(), reward, terminated, False, self._get_info(invalid_this_step)
 
-    def _get_info(self):
+    def _get_info(self, invalid_this_step: bool = False):
         info = {
             "current_trace": self.current_trace,
             "traces_placed": len(self.placed_tps),
+            "invalid_this_step": invalid_this_step,
+            "episode_invalid_actions": self._episode_invalid_actions,
         }
         if self.routed_lengths is not None:
             info["trace_lengths"] = self.routed_lengths
-            info["failures"] = sum(
-                1 for l in self.routed_lengths if l == float('inf')
-            )
+        info.update(self._terminal_metrics)
         return info
 
     def render(self):

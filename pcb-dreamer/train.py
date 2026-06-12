@@ -8,9 +8,12 @@ Usage:
 
 import argparse
 import functools
+import json
 import os
 import pathlib
+import subprocess
 import sys
+from datetime import datetime
 
 os.environ["MUJOCO_GL"] = "osmesa"
 
@@ -46,13 +49,36 @@ def count_steps(folder):
     return sum(int(str(n).split("-")[-1][:-4]) - 1 for n in folder.glob("*.npz"))
 
 
+def get_git_commit():
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=pathlib.Path(__file__).parent,
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except Exception:
+        return "nogit"
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--configs", nargs="+", default=["defaults"])
-    parser.add_argument("--logdir", type=str, default="./logdir/pcb")
+    parser.add_argument("--logdir", type=str, default=None,
+                        help="Explicit logdir. If omitted, an auto-named "
+                             "run directory under ./logdir/ is used.")
+    parser.add_argument("--run_name", type=str, default=None,
+                        help="Name for the auto-generated run directory "
+                             "(ignored if --logdir is set).")
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num_traces", type=int, default=8)
+    # Optional overrides for run-budget knobs, so a named config doesn't
+    # need to be edited/duplicated just to change run length.
+    parser.add_argument("--steps", type=float, default=None)
+    parser.add_argument("--prefill", type=int, default=None)
+    parser.add_argument("--eval_every", type=float, default=None)
+    parser.add_argument("--eval_episode_num", type=int, default=None)
+    parser.add_argument("--log_every", type=float, default=None)
     args = parser.parse_args()
 
     # Load config
@@ -63,7 +89,22 @@ def main():
         assert name in configs, f"Config '{name}' not found in {list(configs.keys())}"
         config.update(configs[name])
 
-    config["logdir"] = args.logdir
+    for key in ["steps", "prefill", "eval_every", "eval_episode_num", "log_every"]:
+        override = getattr(args, key)
+        if override is not None:
+            config[key] = override
+
+    commit = get_git_commit()
+    if args.logdir is not None:
+        logdir_str = args.logdir
+    else:
+        run_name = args.run_name or (
+            f"{'-'.join(args.configs)}_t{args.num_traces}_s{args.seed}"
+            f"_{commit}_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        )
+        logdir_str = str(pathlib.Path("./logdir") / run_name)
+
+    config["logdir"] = logdir_str
     config["seed"] = args.seed
     if args.device:
         config["device"] = args.device
@@ -93,6 +134,22 @@ def main():
     logdir.mkdir(parents=True, exist_ok=True)
     config.traindir.mkdir(parents=True, exist_ok=True)
     config.evaldir.mkdir(parents=True, exist_ok=True)
+
+    meta_path = logdir / "meta.json"
+    if not meta_path.exists():
+        meta = {
+            "configs": args.configs,
+            "num_traces": args.num_traces,
+            "seed": args.seed,
+            "git_commit": commit,
+            "created": datetime.now().isoformat(timespec="seconds"),
+            "config": {
+                k: (str(v) if isinstance(v, pathlib.Path) else v)
+                for k, v in vars(config).items()
+            },
+        }
+        meta_path.write_text(json.dumps(meta, indent=2, default=str))
+    print(f"Run metadata: {meta_path}")
 
     step = count_steps(config.traindir)
     logger = tools.Logger(logdir, config.action_repeat * step)
