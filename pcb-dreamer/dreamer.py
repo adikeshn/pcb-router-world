@@ -88,14 +88,15 @@ class Dreamer(nn.Module):
         if self._config.eval_state_mean:
             latent["stoch"] = latent["mean"]
         feat = self._wm.dynamics.get_feat(latent)
+        mask = obs.get("action_mask")
         if not training:
-            actor = self._task_behavior.actor(feat)
+            actor = self._task_behavior.actor(feat, mask=mask)
             action = actor.mode()
         elif self._should_expl(self._step):
-            actor = self._expl_behavior.actor(feat)
+            actor = self._expl_behavior.actor(feat, mask=mask)
             action = actor.sample()
         else:
-            actor = self._task_behavior.actor(feat)
+            actor = self._task_behavior.actor(feat, mask=mask)
             action = actor.sample()
         logprob = actor.log_prob(action)
         latent = {k: v.detach() for k, v in latent.items()}
@@ -116,7 +117,13 @@ class Dreamer(nn.Module):
         reward = lambda f, s, a: self._wm.heads["reward"](
             self._wm.dynamics.get_feat(s)
         ).mode()
-        metrics.update(self._task_behavior._train(start, reward)[-1])
+        action_mask = None
+        if "action_mask" in data:
+            action_mask = torch.tensor(
+                data["action_mask"], device=self._config.device, dtype=torch.float32
+            )
+            action_mask = action_mask.reshape(-1, action_mask.shape[-1])
+        metrics.update(self._task_behavior._train(start, reward, action_mask)[-1])
         if self._config.expl_behavior != "greedy":
             mets = self._expl_behavior.train(start, context, data)[-1]
             metrics.update({"expl_" + key: value for key, value in mets.items()})

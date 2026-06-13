@@ -654,7 +654,7 @@ class MLP(nn.Module):
                 self.std_layer = nn.Linear(units, np.prod(self._shape))
                 self.std_layer.apply(tools.uniform_weight_init(outscale))
 
-    def forward(self, features, dtype=None):
+    def forward(self, features, dtype=None, mask=None):
         x = features
         if self._symlog_inputs:
             x = tools.symlog(x)
@@ -670,7 +670,7 @@ class MLP(nn.Module):
                     std = self.std_layer[name](out)
                 else:
                     std = self._std
-                dists.update({name: self.dist(self._dist, mean, std, shape)})
+                dists.update({name: self.dist(self._dist, mean, std, shape, mask)})
             return dists
         else:
             mean = self.mean_layer(out)
@@ -678,9 +678,9 @@ class MLP(nn.Module):
                 std = self.std_layer(out)
             else:
                 std = self._std
-            return self.dist(self._dist, mean, std, self._shape)
+            return self.dist(self._dist, mean, std, self._shape, mask)
 
-    def dist(self, dist, mean, std, shape):
+    def dist(self, dist, mean, std, shape, mask=None):
         if dist == "tanh_normal":
             mean = torch.tanh(mean)
             std = F.softplus(std) + self._min_std
@@ -711,8 +711,12 @@ class MLP(nn.Module):
                 torchd.independent.Independent(dist, 1), absmax=self._absmax
             )
         elif dist == "onehot":
+            if mask is not None:
+                mean = torch.where(mask.bool(), mean, torch.full_like(mean, -1e8))
             dist = tools.OneHotDist(mean, unimix_ratio=self._unimix_ratio)
         elif dist == "onehot_gumble":
+            if mask is not None:
+                mean = torch.where(mask.bool(), mean, torch.full_like(mean, -1e8))
             dist = tools.ContDist(
                 torchd.gumbel.Gumbel(mean, 1 / self._temp), absmax=self._absmax
             )

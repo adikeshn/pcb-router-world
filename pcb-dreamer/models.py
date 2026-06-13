@@ -292,6 +292,7 @@ class ImagBehavior(nn.Module):
         self,
         start,
         objective,
+        action_mask=None,
     ):
         self._update_slow_target()
         metrics = {}
@@ -299,10 +300,10 @@ class ImagBehavior(nn.Module):
         with tools.RequiresGrad(self.actor):
             with torch.cuda.amp.autocast(self._use_amp):
                 imag_feat, imag_state, imag_action = self._imagine(
-                    start, self.actor, self._config.imag_horizon
+                    start, self.actor, self._config.imag_horizon, action_mask
                 )
                 reward = objective(imag_feat, imag_state, imag_action)
-                actor_ent = self.actor(imag_feat).entropy()
+                actor_ent = self.actor(imag_feat, mask=action_mask).entropy()
                 state_ent = self._world_model.dynamics.get_dist(imag_state).entropy()
                 # this target is not scaled by ema or sym_log.
                 target, weights, base = self._compute_target(
@@ -314,6 +315,7 @@ class ImagBehavior(nn.Module):
                     target,
                     weights,
                     base,
+                    action_mask,
                 )
                 actor_loss -= self._config.actor["entropy"] * actor_ent[:-1, ..., None]
                 actor_loss = torch.mean(actor_loss)
@@ -349,7 +351,7 @@ class ImagBehavior(nn.Module):
             metrics.update(self._value_opt(value_loss, self.value.parameters()))
         return imag_feat, imag_state, imag_action, weights, metrics
 
-    def _imagine(self, start, policy, horizon):
+    def _imagine(self, start, policy, horizon, mask=None):
         dynamics = self._world_model.dynamics
         flatten = lambda x: x.reshape([-1] + list(x.shape[2:]))
         start = {k: flatten(v) for k, v in start.items()}
@@ -358,7 +360,7 @@ class ImagBehavior(nn.Module):
             state, _, _ = prev
             feat = dynamics.get_feat(state)
             inp = feat.detach()
-            action = policy(inp).sample()
+            action = policy(inp, mask=mask).sample()
             succ = dynamics.img_step(state, action)
             return succ, feat, action
 
@@ -396,10 +398,11 @@ class ImagBehavior(nn.Module):
         target,
         weights,
         base,
+        action_mask=None,
     ):
         metrics = {}
         inp = imag_feat.detach()
-        policy = self.actor(inp)
+        policy = self.actor(inp, mask=action_mask)
         # Q-val for actor is not transformed using symlog
         target = torch.stack(target, dim=1)
         if self._config.reward_EMA:

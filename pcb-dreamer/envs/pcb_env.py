@@ -279,9 +279,13 @@ class TPPlacementEnv(gym.Env):
         self.current_trace += 1
         self._update_candidate_mask()
 
-        # Preserve future options (count only real candidates)
-        valid_frac = self.candidate_mask[:self._real_count].sum() / max(self._real_count, 1)
-        reward += 0.3 * valid_frac
+        # Preserve future options (count only real candidates).
+        # Only awarded on valid placements -- previously this was added
+        # unconditionally, partially offsetting the -2 penalty for an
+        # invalid placement.
+        if not invalid_this_step:
+            valid_frac = self.candidate_mask[:self._real_count].sum() / max(self._real_count, 1)
+            reward += 0.3 * valid_frac
 
         terminated = self.current_trace >= self.num_traces
 

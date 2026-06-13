@@ -57,6 +57,7 @@ class PCBDreamerEnv:
             "is_first": spaces.Box(0, 1, (), dtype=np.uint8),
             "is_last": spaces.Box(0, 1, (), dtype=np.uint8),
             "is_terminal": spaces.Box(0, 1, (), dtype=np.uint8),
+            "action_mask": spaces.Box(0, 1, (self._inner.num_candidates,), dtype=np.float32),
         })
 
     @property
@@ -71,14 +72,20 @@ class PCBDreamerEnv:
     def reset(self):
         obs, _ = self._inner.reset(seed=self._seed)
         self._seed += 1
-        out = {"image": obs, "is_first": True, "is_last": False, "is_terminal": False}
+        out = {
+            "image": obs, "is_first": True, "is_last": False, "is_terminal": False,
+            "action_mask": self._inner.candidate_mask.astype(np.float32),
+        }
         out.update({k: 0.0 for k in _LOG_KEYS})
         return out
 
     def step(self, action):
         obs, reward, terminated, truncated, info = self._inner.step(int(action))
         done = terminated or truncated
-        out = {"image": obs, "is_first": False, "is_last": done, "is_terminal": terminated}
+        out = {
+            "image": obs, "is_first": False, "is_last": done, "is_terminal": terminated,
+            "action_mask": self._inner.candidate_mask.astype(np.float32),
+        }
         out["log_invalid_actions"] = float(info.get("invalid_this_step", False))
         for log_key, info_key in _TERMINAL_INFO_KEYS.items():
             out[log_key] = float(info.get(info_key, 0.0))
