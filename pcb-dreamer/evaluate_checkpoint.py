@@ -102,7 +102,8 @@ def main():
     outdir = logdir / "eval_report"
     outdir.mkdir(exist_ok=True)
 
-    env = make_env("eval", 0, seed=eval_seed, num_traces=num_traces)
+    env = make_env("eval", 0, seed=eval_seed, num_traces=num_traces,
+                   reward_version=meta.get("reward_version", "v1"))
     acts = env.action_space
     config.num_actions = acts.n if hasattr(acts, "n") else acts.shape[0]
 

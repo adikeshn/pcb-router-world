@@ -37,8 +37,9 @@ from best_solution import BestSolutionTracker
 to_np = lambda x: x.detach().cpu().numpy()
 
 
-def make_env(mode, env_id, seed=0, num_traces=8):
-    env = PCBDreamerEnv(num_traces=num_traces, seed=seed + env_id)
+def make_env(mode, env_id, seed=0, num_traces=8, reward_version="v1"):
+    env = PCBDreamerEnv(num_traces=num_traces, seed=seed + env_id,
+                        reward_version=reward_version)
     env = wrappers.OneHotAction(env)
     env = wrappers.TimeLimit(env, num_traces)
     env = wrappers.SelectAction(env, key="action")
@@ -81,6 +82,10 @@ def main():
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num_traces", type=int, default=8)
+    parser.add_argument("--reward_version", type=str, default="v1",
+                        choices=["v1", "v2"],
+                        help="Reward formulation: v1 (original) or v2 "
+                             "(graded routability + capped/rescaled terms).")
     # Optional overrides for run-budget knobs, so a named config doesn't
     # need to be edited/duplicated just to change run length.
     parser.add_argument("--steps", type=float, default=None)
@@ -150,6 +155,7 @@ def main():
             "configs": args.configs,
             "num_traces": args.num_traces,
             "seed": args.seed,
+            "reward_version": args.reward_version,
             "git_commit": commit,
             "created": datetime.now().isoformat(timespec="seconds"),
             "config": {
@@ -164,9 +170,9 @@ def main():
     logger = tools.Logger(logdir, config.action_repeat * step)
 
     print("Creating environments...")
-    train_envs = [Dummy(make_env("train", i, config.seed, args.num_traces))
+    train_envs = [Dummy(make_env("train", i, config.seed, args.num_traces, args.reward_version))
                   for i in range(config.envs)]
-    eval_envs = [Dummy(make_env("eval", i, config.seed, args.num_traces))
+    eval_envs = [Dummy(make_env("eval", i, config.seed, args.num_traces, args.reward_version))
                  for i in range(config.envs)]
 
     acts = train_envs[0].action_space

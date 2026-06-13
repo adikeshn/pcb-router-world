@@ -42,6 +42,7 @@ class TPPlacementEnv(gym.Env):
         use_freerouting: bool = True,
         render_mode: Optional[str] = None,
         seed: int = 0,
+        reward_version: str = "v1",
     ):
         super().__init__()
         self.render_mode = render_mode
@@ -49,6 +50,7 @@ class TPPlacementEnv(gym.Env):
         self._num_traces_requested = num_traces
         self._candidate_resolution = candidate_resolution
         self._board_seed = seed
+        self.reward_version = reward_version
 
         if board is None:
             board = load_te_example(num_traces=num_traces, seed=seed)
@@ -199,35 +201,29 @@ class TPPlacementEnv(gym.Env):
         self.routed_paths = paths
         self.routed_lengths = lengths
 
-        # Routability
-        if failures == 0:
-            reward_routability = 15.0
-        else:
-            reward_routability = -10.0 * failures
-
-        # Trace lengths / length matching
+        n = self.num_traces
         finite = [l for l in lengths if l < float('inf')]
         total_length = sum(finite) if finite else 0.0
         spread = 0.0
-        reward_length = 0.0
-        reward_spread = 0.0
-        if finite:
-            diag = np.hypot(self.board.width, self.board.height)
-            reward_length = -5.0 * sum(finite) / (len(finite) * diag)
-            if len(finite) > 1:
-                spread = (max(finite) - min(finite)) / max(np.mean(finite), 1e-6)
-                reward_spread = -20.0 * spread
-
-        # TP spacing quality
+        if len(finite) > 1:
+            spread = (max(finite) - min(finite)) / max(np.mean(finite), 1e-6)
         min_sp = 0.0
-        reward_spacing = 0.0
         if len(self.placed_tps) > 1:
             min_sp = min(
                 np.hypot(a[0] - b[0], a[1] - b[1])
                 for i, a in enumerate(self.placed_tps)
                 for b in self.placed_tps[i + 1:]
             )
-            reward_spacing = 2.0 * min(min_sp / TP_TO_TP_MIN, 2.0)
+        diag = np.hypot(self.board.width, self.board.height)
+
+        if self.reward_version == "v2":
+            (reward_routability, reward_length,
+             reward_spread, reward_spacing) = self._reward_v2(
+                failures, n, finite, total_length, spread, min_sp, diag)
+        else:
+            (reward_routability, reward_length,
+             reward_spread, reward_spacing) = self._reward_v1(
+                failures, finite, total_length, spread, min_sp, diag)
 
         self._terminal_metrics = {
             "failures": failures,
@@ -242,6 +238,65 @@ class TPPlacementEnv(gym.Env):
         }
 
         return reward_routability + reward_length + reward_spread + reward_spacing
+
+    def _reward_v1(self, failures, finite, total_length, spread, min_sp, diag):
+        """Original reward (unchanged)."""
+        reward_routability = 15.0 if failures == 0 else -10.0 * failures
+        reward_length = 0.0
+        reward_spread = 0.0
+        if finite:
+            reward_length = -5.0 * sum(finite) / (len(finite) * diag)
+            if len(finite) > 1:
+                reward_spread = -20.0 * spread
+        reward_spacing = 0.0
+        if len(self.placed_tps) > 1:
+            reward_spacing = 2.0 * min(min_sp / TP_TO_TP_MIN, 2.0)
+        return reward_routability, reward_length, reward_spread, reward_spacing
+
+    def _reward_v2(self, failures, n, finite, total_length, spread, min_sp, diag):
+        """Revised reward.
+
+        Changes vs v1, all aimed at making the terminal signal smoother and
+        better-scaled for the world model's reward head:
+
+        1. Routability is graded by the FRACTION of traces routed (gives the
+           world model a "getting closer" gradient) plus a completion bonus
+           for full routability, instead of a +15 / -10*failures cliff.
+           Range: roughly [0, 10].
+        2. Length-spread penalty is CAPPED and down-weighted, so a single
+           outlier trace can't dominate the whole reward. Length matching is
+           largely handled post-hoc by meandering, so this is a soft steer.
+           Range: [-6, 0].
+        3. Length penalty is bounded to a comparable scale. Range: [-4, 0].
+        4. Spacing bonus unchanged in spirit but slightly rescaled.
+           Range: [0, 3].
+
+        Net terminal reward roughly in [-6, ~16], comparable in magnitude to
+        the per-step rewards accumulated over an episode (~±5), rather than
+        the v1 terminal block that could swing to -200+.
+        """
+        # 1. Graded routability
+        routed = n - failures
+        frac_routed = routed / max(n, 1)
+        reward_routability = 6.0 * frac_routed
+        if failures == 0:
+            reward_routability += 4.0  # completion bonus -> max 10
+
+        # 2/3. Length terms only meaningful when something routed
+        reward_length = 0.0
+        reward_spread = 0.0
+        if finite:
+            avg_frac = (sum(finite) / len(finite)) / diag
+            reward_length = -4.0 * min(avg_frac, 1.0)  # bounded [-4, 0]
+            if len(finite) > 1:
+                reward_spread = -6.0 * min(spread, 1.0)  # capped [-6, 0]
+
+        # 4. Spacing quality
+        reward_spacing = 0.0
+        if len(self.placed_tps) > 1:
+            reward_spacing = 3.0 * min(min_sp / TP_TO_TP_MIN, 1.0)  # [0, 3]
+
+        return reward_routability, reward_length, reward_spread, reward_spacing
 
     # ---- gym interface ----
 

@@ -45,8 +45,9 @@ _TERMINAL_INFO_KEYS = {
 class PCBDreamerEnv:
     metadata = {}
 
-    def __init__(self, num_traces=8, seed=0):
-        self._inner = TPPlacementEnv(num_traces=num_traces, seed=seed)
+    def __init__(self, num_traces=8, seed=0, reward_version="v1"):
+        self._inner = TPPlacementEnv(num_traces=num_traces, seed=seed,
+                                     reward_version=reward_version)
         self._seed = seed
         self.reward_range = [-np.inf, np.inf]
 
