@@ -136,6 +136,7 @@ def simulate(
     steps=0,
     episodes=0,
     state=None,
+    episode_callback=None,
 ):
     # initialize or unpack simulation state
     if state is None:
@@ -202,6 +203,11 @@ def simulate(
             indices = [index for index, d in enumerate(done) if d]
             # logging for done episode
             for i in indices:
+                if episode_callback is not None:
+                    try:
+                        episode_callback(envs[i], is_eval)
+                    except Exception as e:
+                        print(f"[episode_callback] error: {e}")
                 save_episodes(directory, {envs[i].id: cache[envs[i].id]})
                 ep_length = len(cache[envs[i].id]["reward"]) - 1
                 score = float(np.array(cache[envs[i].id]["reward"]).sum())

@@ -32,6 +32,7 @@ from envs import wrappers
 from envs.dreamer_wrapper import PCBDreamerEnv
 from parallel import Parallel, Dummy
 from dreamer import Dreamer
+from best_solution import BestSolutionTracker
 
 to_np = lambda x: x.detach().cpu().numpy()
 
@@ -43,6 +44,14 @@ def make_env(mode, env_id, seed=0, num_traces=8):
     env = wrappers.SelectAction(env, key="action")
     env = wrappers.UUID(env)
     return env
+
+
+def get_inner_env(env):
+    """Unwrap the wrapper chain down to the raw TPPlacementEnv."""
+    raw = env
+    while not hasattr(raw, "_inner"):
+        raw = raw.env
+    return raw._inner
 
 
 def count_steps(folder):
@@ -215,6 +224,22 @@ def main():
     print("Training DreamerV3 on PCB Test Point Placement")
     print(f"{'='*50}")
 
+    # Best-solution tracker: this run trains on a single fixed board, so the
+    # whole run is a search. Track the best valid placement found across all
+    # episodes (train + eval), independent of the final policy state.
+    tracker = BestSolutionTracker(logdir, get_inner_env(train_envs[0]).board)
+
+    def track_episode(env, is_eval):
+        improved = tracker.update(
+            get_inner_env(env), agent._step,
+            source=("eval" if is_eval else "train"),
+        )
+        if improved:
+            b = tracker.best
+            print(f"  [best] new best @ step {b['step']} ({b['source']}): "
+                  f"len={b['total_length']:.0f}mm, spread={b['length_spread']:.2f}, "
+                  f"spacing={b['min_tp_spacing']:.1f}mm")
+
     while agent._step < config.steps + config.eval_every:
         logger.write()
 
@@ -224,6 +249,7 @@ def main():
                 functools.partial(agent, training=False),
                 eval_envs, eval_eps, config.evaldir,
                 logger, is_eval=True, episodes=config.eval_episode_num,
+                episode_callback=track_episode,
             )
             if config.video_pred_log:
                 try:
@@ -237,12 +263,24 @@ def main():
             agent, train_envs, train_eps, config.traindir,
             logger, limit=config.dataset_size,
             steps=config.eval_every, state=state,
+            episode_callback=track_episode,
         )
 
         torch.save({
             "agent_state_dict": agent.state_dict(),
             "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
         }, logdir / "latest.pt")
+
+    if tracker.best is not None:
+        b = tracker.best
+        print(f"\nBest valid solution found @ step {b['step']} ({b['source']}): "
+              f"total_length={b['total_length']:.1f}mm, "
+              f"length_spread={b['length_spread']:.3f}, "
+              f"min_tp_spacing={b['min_tp_spacing']:.1f}mm")
+        print(f"  -> {logdir / 'best_solution.json'}")
+        print(f"  -> {logdir / 'best_solution.png'}")
+    else:
+        print("\nNo fully-routable solution found during training.")
 
     for env in train_envs + eval_envs:
         try: env.close()

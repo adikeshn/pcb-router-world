@@ -81,9 +81,11 @@ def main():
     parser.add_argument("--checkpoint", type=str, default="latest.pt")
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--render_episodes", type=int, default=3)
-    parser.add_argument("--seed", type=int, default=10000,
-                         help="Seed range disjoint from training/eval seeds, "
-                              "for held-out board layouts.")
+    parser.add_argument("--seed", type=int, default=None,
+                         help="Board seed to evaluate on. Default: the seed the "
+                              "run trained on (from meta.json) -- i.e. the same "
+                              "board. Pass a different value (e.g. a held-out seed) "
+                              "to measure out-of-distribution generalization.")
     parser.add_argument("--skip_baselines", action="store_true")
     args = parser.parse_args()
 
@@ -91,10 +93,16 @@ def main():
     config, meta = load_config(logdir)
     num_traces = meta["num_traces"]
 
+    # Default to the training board so eval reflects the single-board task.
+    eval_seed = args.seed if args.seed is not None else meta.get("seed", 0)
+    if eval_seed != meta.get("seed", 0):
+        print(f"[eval] NOTE: evaluating on seed={eval_seed}, which differs from "
+              f"the training seed={meta.get('seed', 0)} (out-of-distribution board).")
+
     outdir = logdir / "eval_report"
     outdir.mkdir(exist_ok=True)
 
-    env = make_env("eval", 0, seed=args.seed, num_traces=num_traces)
+    env = make_env("eval", 0, seed=eval_seed, num_traces=num_traces)
     acts = env.action_space
     config.num_actions = acts.n if hasattr(acts, "n") else acts.shape[0]
 
