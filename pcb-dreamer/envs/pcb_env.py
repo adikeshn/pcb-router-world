@@ -216,7 +216,11 @@ class TPPlacementEnv(gym.Env):
             )
         diag = np.hypot(self.board.width, self.board.height)
 
-        if self.reward_version == "v2":
+        if self.reward_version == "v3":
+            (reward_routability, reward_length,
+             reward_spread, reward_spacing) = self._reward_v3(
+                failures, n, finite, total_length, spread, min_sp, diag)
+        elif self.reward_version == "v2":
             (reward_routability, reward_length,
              reward_spread, reward_spacing) = self._reward_v2(
                 failures, n, finite, total_length, spread, min_sp, diag)
@@ -298,7 +302,45 @@ class TPPlacementEnv(gym.Env):
 
         return reward_routability, reward_length, reward_spread, reward_spacing
 
-    # ---- gym interface ----
+    def _reward_v3(self, failures, n, finite, total_length, spread, min_sp, diag):
+        """Length-matching-first reward.
+
+        Same graded-routability gate as v2 (routing must succeed for the
+        quality terms to matter), but among routable solutions the length
+        SPREAD penalty is by far the dominant signal, with total-length and
+        spacing demoted to small tiebreakers. Use when the goal is "produce
+        the most length-matched placement, almost regardless of routing length
+        or spacing (as long as it routes and meets the hard spacing minimum)."
+
+        Term ranges (when fully routed):
+          routability : +10  (constant once routable; graded below that)
+          spread      : [-25, 0]   <- dominant quality signal
+          length      : [-2, 0]    <- minor tiebreaker
+          spacing     : [0, 1.5]   <- minor tiebreaker
+        Hard spacing minimum is still enforced per-step (invalid placements
+        are rejected with -2 and never enter placed_tps), so spacing only
+        needs to be a gentle "more is slightly better" nudge here.
+        """
+        # Graded routability gate (same shape as v2)
+        routed = n - failures
+        reward_routability = 6.0 * (routed / max(n, 1))
+        if failures == 0:
+            reward_routability += 4.0  # -> 10 when fully routed
+
+        reward_length = 0.0
+        reward_spread = 0.0
+        if finite:
+            avg_frac = (sum(finite) / len(finite)) / diag
+            reward_length = -2.0 * min(avg_frac, 1.0)   # minor: [-2, 0]
+            if len(finite) > 1:
+                # Dominant term: heavily penalize spread, uncapped within reason.
+                reward_spread = -25.0 * min(spread, 1.0)  # [-25, 0]
+
+        reward_spacing = 0.0
+        if len(self.placed_tps) > 1:
+            reward_spacing = 1.5 * min(min_sp / TP_TO_TP_MIN, 1.0)  # minor: [0, 1.5]
+
+        return reward_routability, reward_length, reward_spread, reward_spacing
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)

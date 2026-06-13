@@ -32,7 +32,7 @@ from envs import wrappers
 from envs.dreamer_wrapper import PCBDreamerEnv
 from parallel import Parallel, Dummy
 from dreamer import Dreamer
-from best_solution import BestSolutionTracker
+from best_solution import DiverseSolutionTracker
 
 to_np = lambda x: x.detach().cpu().numpy()
 
@@ -83,9 +83,18 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num_traces", type=int, default=8)
     parser.add_argument("--reward_version", type=str, default="v1",
-                        choices=["v1", "v2"],
-                        help="Reward formulation: v1 (original) or v2 "
-                             "(graded routability + capped/rescaled terms).")
+                        choices=["v1", "v2", "v3"],
+                        help="Reward formulation: v1 (original), v2 (graded "
+                             "routability + capped terms), or v3 (length "
+                             "matching prioritized above all else).")
+    parser.add_argument("--top_k", type=int, default=5,
+                        help="Number of diverse solutions to keep.")
+    parser.add_argument("--diversity_shift", type=float, default=13.0,
+                        help="Min distance (mm) a test point must move to count "
+                             "as relocated when judging layout diversity.")
+    parser.add_argument("--diversity_frac", type=float, default=0.5,
+                        help="Min fraction of test points that must each be "
+                             "relocated for two layouts to be considered distinct.")
     # Optional overrides for run-budget knobs, so a named config doesn't
     # need to be edited/duplicated just to change run length.
     parser.add_argument("--steps", type=float, default=None)
@@ -230,21 +239,23 @@ def main():
     print("Training DreamerV3 on PCB Test Point Placement")
     print(f"{'='*50}")
 
-    # Best-solution tracker: this run trains on a single fixed board, so the
-    # whole run is a search. Track the best valid placement found across all
-    # episodes (train + eval), independent of the final policy state.
-    tracker = BestSolutionTracker(logdir, get_inner_env(train_envs[0]).board)
+    # Diverse top-K solution tracker: this run trains on a single fixed board,
+    # so the whole run is a search. Keep the best K *distinct* valid layouts
+    # found across all episodes (train + eval), a portfolio of alternatives.
+    tracker = DiverseSolutionTracker(
+        logdir, get_inner_env(train_envs[0]).board,
+        k=args.top_k,
+        min_point_shift=args.diversity_shift,
+        min_moved_frac=args.diversity_frac,
+    )
 
     def track_episode(env, is_eval):
-        improved = tracker.update(
+        status = tracker.update(
             get_inner_env(env), agent._step,
             source=("eval" if is_eval else "train"),
         )
-        if improved:
-            b = tracker.best
-            print(f"  [best] new best @ step {b['step']} ({b['source']}): "
-                  f"len={b['total_length']:.0f}mm, spread={b['length_spread']:.2f}, "
-                  f"spacing={b['min_tp_spacing']:.1f}mm")
+        if status:
+            print(f"  [solutions] {status}")
 
     while agent._step < config.steps + config.eval_every:
         logger.write()
@@ -277,14 +288,15 @@ def main():
             "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
         }, logdir / "latest.pt")
 
-    if tracker.best is not None:
-        b = tracker.best
-        print(f"\nBest valid solution found @ step {b['step']} ({b['source']}): "
-              f"total_length={b['total_length']:.1f}mm, "
-              f"length_spread={b['length_spread']:.3f}, "
-              f"min_tp_spacing={b['min_tp_spacing']:.1f}mm")
-        print(f"  -> {logdir / 'best_solution.json'}")
-        print(f"  -> {logdir / 'best_solution.png'}")
+    if tracker.solutions:
+        print(f"\nTop {len(tracker.solutions)} distinct valid layouts found "
+              f"(ranked, 0=best, length-matching first):")
+        for rank, s in enumerate(tracker.solutions):
+            print(f"  [{rank}] spread={s['length_spread']:.3f} "
+                  f"total_length={s['total_length']:.1f}mm "
+                  f"min_spacing={s['min_tp_spacing']:.1f}mm "
+                  f"(found @ step {s['step']}, {s['source']})")
+        print(f"  -> {logdir / 'solutions'}/ (solution_*.json + solution_*.png)")
     else:
         print("\nNo fully-routable solution found during training.")
 
