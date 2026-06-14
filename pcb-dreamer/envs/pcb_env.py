@@ -316,42 +316,46 @@ class TPPlacementEnv(gym.Env):
         (dominant) spread term while dodging routing cost. The policy collapsed
         onto a 2-of-4-failing placement because it out-scored fully-routed ones.
 
-        This version makes full routability STRICTLY dominate:
-          - Any failure incurs a large per-failure penalty that no quality
-            bonus can offset, so a partial solution can never beat a complete
-            one.
-          - The length-matching / length / spacing quality terms are credited
-            ONLY when failures == 0. Partial boards get routability signal
-            (graded, to still guide 'getting closer') but zero quality reward.
+        This version makes full routability STRICTLY dominate, with a
+        guaranteed margin: the WORST possible fully-routed reward is held
+        above the BEST possible partial reward, so no quality penalty can ever
+        make completing the board look worse than failing a trace.
 
-        Fully-routed term ranges:
-          routability : +12 (flat completion reward)
-          spread      : [-25, 0]   <- dominant quality signal
-          length      : [-2, 0]    <- minor tiebreaker
-          spacing     : [0, 1.5]   <- minor tiebreaker
-        Partial (failures > 0):
-          routability : 4*(fraction routed) - 8*failures   (always < full)
-          all quality terms : 0
+          full route:  +20 base, minus a quality penalty capped at 12 total
+                       -> full-route reward in [+8, +20]
+          partial:     4*frac - 8*failures  (best case, 1 failure: < 0)
+                       -> always far below +8, with zero quality reward
+
+        Within the 12-point full-route quality budget, length SPREAD is the
+        dominant differentiator (up to -10), with length and spacing as small
+        tiebreakers, preserving the 'length-matching first' intent for ranking
+        among complete solutions.
         """
         if failures == 0:
-            reward_routability = 12.0
-            reward_length = 0.0
-            reward_spread = 0.0
+            base = 20.0
+            # Quality penalties (deducted from base); spread dominant.
+            pen_spread = 0.0
+            pen_length = 0.0
             if finite:
                 avg_frac = (sum(finite) / len(finite)) / diag
-                reward_length = -2.0 * min(avg_frac, 1.0)
+                pen_length = 1.0 * min(avg_frac, 1.0)        # up to -1
                 if len(finite) > 1:
-                    reward_spread = -25.0 * min(spread, 1.0)
-            reward_spacing = 0.0
+                    pen_spread = 10.0 * min(spread, 1.0)     # up to -10 (dominant)
+            bonus_spacing = 0.0
             if len(self.placed_tps) > 1:
-                reward_spacing = 1.5 * min(min_sp / TP_TO_TP_MIN, 1.0)
+                bonus_spacing = 1.0 * min(min_sp / TP_TO_TP_MIN, 1.0)  # up to +1
+
+            # Report terms in the same slots as v1/v2 for logging continuity.
+            reward_routability = base
+            reward_length = -pen_length
+            reward_spread = -pen_spread
+            reward_spacing = bonus_spacing
             return reward_routability, reward_length, reward_spread, reward_spacing
 
-        # Partial routing: graded "getting closer" signal, but a steep
-        # per-failure penalty guarantees it stays below any complete solution.
-        # Max partial routability (1 failure on a large board) is
-        # 4*((n-1)/n) - 8 < 0, well under the +12 a complete solution earns
-        # even after its quality penalties.
+        # Partial routing: graded "getting closer" signal only, no quality
+        # reward. Best possible partial (1 failure) is 4*((n-1)/n) - 8 < 0,
+        # which is far below the +8 worst-case full route -- so completing the
+        # board always wins regardless of how poorly length-matched it is.
         routed = n - failures
         reward_routability = 4.0 * (routed / max(n, 1)) - 8.0 * failures
         return reward_routability, 0.0, 0.0, 0.0
