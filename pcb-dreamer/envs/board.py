@@ -106,7 +106,7 @@ TP_TO_CONNECTOR_MIN = 3.0   # mm, center-to-edge (from PCB Routine Material)
 TRACE_MIN_CENTER_TO_CENTER = TRACE_TO_TRACE_MIN + TRACE_WIDTH  # 1.3286mm
 
 # Fixed action-space size so it stays constant across board geometries.
-MAX_CANDIDATES = 200
+MAX_CANDIDATES = 400
 
 
 def _respaced_x(original_x: List[float], min_spacing: float) -> List[float]:
@@ -291,9 +291,16 @@ def generate_candidate_grid(board: BoardSpec, resolution: float = 6.5,
             if _is_valid_tp_position(board, x, y):
                 candidates.append((x, y))
 
-    # Truncate if too many
+    # If there are more valid candidates than fit in the fixed-size action
+    # space, SUBSAMPLE EVENLY across the full set rather than truncating to
+    # the first N. The grid is built column-major (x outer), so a plain
+    # truncation keeps only the leftmost columns and leaves the right side of
+    # the board with no candidates. Evenly-spaced index selection preserves
+    # spatial coverage across the whole board.
     if len(candidates) > max_candidates:
-        candidates = candidates[:max_candidates]
+        idx = np.linspace(0, len(candidates) - 1, max_candidates)
+        idx = np.unique(np.round(idx).astype(int))
+        candidates = [candidates[i] for i in idx]
 
     real_count = len(candidates)
 
