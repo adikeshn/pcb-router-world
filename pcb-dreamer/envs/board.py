@@ -125,7 +125,9 @@ def _respaced_x(original_x: List[float], min_spacing: float) -> List[float]:
     return new_x
 
 
-def load_te_example(num_traces: int = 10, seed: int = None) -> BoardSpec:
+def load_te_example(num_traces: int = 10, seed: int = None,
+                    board_width: float = 135.0,
+                    board_height: float = 90.0) -> BoardSpec:
     """
     Load the TE AutoLayout Example01 board.
 
@@ -140,12 +142,16 @@ def load_te_example(num_traces: int = 10, seed: int = None) -> BoardSpec:
                     starting traces) is shifted to a random position on
                     the board, giving each seed a different layout while
                     preserving internal geometry.
+        board_width, board_height: outer board dimensions (mm). Defaults
+                    match the TE example (135 x 90). Enlarging gives the
+                    router more space and yields more test-point candidates;
+                    the connector cluster keeps its real hardware size.
     """
     board = BoardSpec(
         origin_x=0.0,
         origin_y=98.2,
-        width=135.0,
-        height=90.0,
+        width=board_width,
+        height=board_height,
     )
 
     # ------------------------------------------------------------------

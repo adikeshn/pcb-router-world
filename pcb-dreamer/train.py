@@ -37,9 +37,11 @@ from best_solution import DiverseSolutionTracker
 to_np = lambda x: x.detach().cpu().numpy()
 
 
-def make_env(mode, env_id, seed=0, num_traces=8, reward_version="v1"):
+def make_env(mode, env_id, seed=0, num_traces=8, reward_version="v1",
+             board_width=135.0, board_height=90.0):
     env = PCBDreamerEnv(num_traces=num_traces, seed=seed + env_id,
-                        reward_version=reward_version)
+                        reward_version=reward_version,
+                        board_width=board_width, board_height=board_height)
     env = wrappers.OneHotAction(env)
     env = wrappers.TimeLimit(env, num_traces)
     env = wrappers.SelectAction(env, key="action")
@@ -101,6 +103,10 @@ def main():
                              "for filling a diverse top-K portfolio; too high "
                              "stops the policy committing to good layouts. "
                              "Try ~1e-2 first.")
+    parser.add_argument("--board_width", type=float, default=135.0,
+                        help="Board width in mm (default 135, the TE example).")
+    parser.add_argument("--board_height", type=float, default=90.0,
+                        help="Board height in mm (default 90, the TE example).")
     # Optional overrides for run-budget knobs, so a named config doesn't
     # need to be edited/duplicated just to change run length.
     parser.add_argument("--steps", type=float, default=None)
@@ -177,6 +183,8 @@ def main():
             "num_traces": args.num_traces,
             "seed": args.seed,
             "reward_version": args.reward_version,
+            "board_width": args.board_width,
+            "board_height": args.board_height,
             "git_commit": commit,
             "created": datetime.now().isoformat(timespec="seconds"),
             "config": {
@@ -191,9 +199,11 @@ def main():
     logger = tools.Logger(logdir, config.action_repeat * step)
 
     print("Creating environments...")
-    train_envs = [Dummy(make_env("train", i, config.seed, args.num_traces, args.reward_version))
+    train_envs = [Dummy(make_env("train", i, config.seed, args.num_traces, args.reward_version,
+                                 args.board_width, args.board_height))
                   for i in range(config.envs)]
-    eval_envs = [Dummy(make_env("eval", i, config.seed, args.num_traces, args.reward_version))
+    eval_envs = [Dummy(make_env("eval", i, config.seed, args.num_traces, args.reward_version,
+                                args.board_width, args.board_height))
                  for i in range(config.envs)]
 
     acts = train_envs[0].action_space

@@ -43,6 +43,8 @@ class TPPlacementEnv(gym.Env):
         render_mode: Optional[str] = None,
         seed: int = 0,
         reward_version: str = "v1",
+        board_width: float = 135.0,
+        board_height: float = 90.0,
     ):
         super().__init__()
         self.render_mode = render_mode
@@ -53,7 +55,9 @@ class TPPlacementEnv(gym.Env):
         self.reward_version = reward_version
 
         if board is None:
-            board = load_te_example(num_traces=num_traces, seed=seed)
+            board = load_te_example(num_traces=num_traces, seed=seed,
+                                    board_width=board_width,
+                                    board_height=board_height)
         self.board = board
         self.num_traces = min(num_traces, len(self.board.traces))
         self.board.traces = self.board.traces[:self.num_traces]
@@ -303,44 +307,54 @@ class TPPlacementEnv(gym.Env):
         return reward_routability, reward_length, reward_spread, reward_spacing
 
     def _reward_v3(self, failures, n, finite, total_length, spread, min_sp, diag):
-        """Length-matching-first reward.
+        """Length-matching-first reward, with the dropped-trace exploit closed.
 
-        Same graded-routability gate as v2 (routing must succeed for the
-        quality terms to matter), but among routable solutions the length
-        SPREAD penalty is by far the dominant signal, with total-length and
-        spacing demoted to small tiebreakers. Use when the goal is "produce
-        the most length-matched placement, almost regardless of routing length
-        or spacing (as long as it routes and meets the hard spacing minimum)."
+        IMPORTANT FIX: in the original v3, spread/length/spacing were computed
+        over only the *successfully routed* traces. That created a perverse
+        incentive to let traces FAIL -- dropping a trace shrinks the finite-
+        length set to a trivially length-matched subset, scoring well on the
+        (dominant) spread term while dodging routing cost. The policy collapsed
+        onto a 2-of-4-failing placement because it out-scored fully-routed ones.
 
-        Term ranges (when fully routed):
-          routability : +10  (constant once routable; graded below that)
+        This version makes full routability STRICTLY dominate:
+          - Any failure incurs a large per-failure penalty that no quality
+            bonus can offset, so a partial solution can never beat a complete
+            one.
+          - The length-matching / length / spacing quality terms are credited
+            ONLY when failures == 0. Partial boards get routability signal
+            (graded, to still guide 'getting closer') but zero quality reward.
+
+        Fully-routed term ranges:
+          routability : +12 (flat completion reward)
           spread      : [-25, 0]   <- dominant quality signal
           length      : [-2, 0]    <- minor tiebreaker
           spacing     : [0, 1.5]   <- minor tiebreaker
-        Hard spacing minimum is still enforced per-step (invalid placements
-        are rejected with -2 and never enter placed_tps), so spacing only
-        needs to be a gentle "more is slightly better" nudge here.
+        Partial (failures > 0):
+          routability : 4*(fraction routed) - 8*failures   (always < full)
+          all quality terms : 0
         """
-        # Graded routability gate (same shape as v2)
-        routed = n - failures
-        reward_routability = 6.0 * (routed / max(n, 1))
         if failures == 0:
-            reward_routability += 4.0  # -> 10 when fully routed
+            reward_routability = 12.0
+            reward_length = 0.0
+            reward_spread = 0.0
+            if finite:
+                avg_frac = (sum(finite) / len(finite)) / diag
+                reward_length = -2.0 * min(avg_frac, 1.0)
+                if len(finite) > 1:
+                    reward_spread = -25.0 * min(spread, 1.0)
+            reward_spacing = 0.0
+            if len(self.placed_tps) > 1:
+                reward_spacing = 1.5 * min(min_sp / TP_TO_TP_MIN, 1.0)
+            return reward_routability, reward_length, reward_spread, reward_spacing
 
-        reward_length = 0.0
-        reward_spread = 0.0
-        if finite:
-            avg_frac = (sum(finite) / len(finite)) / diag
-            reward_length = -2.0 * min(avg_frac, 1.0)   # minor: [-2, 0]
-            if len(finite) > 1:
-                # Dominant term: heavily penalize spread, uncapped within reason.
-                reward_spread = -25.0 * min(spread, 1.0)  # [-25, 0]
-
-        reward_spacing = 0.0
-        if len(self.placed_tps) > 1:
-            reward_spacing = 1.5 * min(min_sp / TP_TO_TP_MIN, 1.0)  # minor: [0, 1.5]
-
-        return reward_routability, reward_length, reward_spread, reward_spacing
+        # Partial routing: graded "getting closer" signal, but a steep
+        # per-failure penalty guarantees it stays below any complete solution.
+        # Max partial routability (1 failure on a large board) is
+        # 4*((n-1)/n) - 8 < 0, well under the +12 a complete solution earns
+        # even after its quality penalties.
+        routed = n - failures
+        reward_routability = 4.0 * (routed / max(n, 1)) - 8.0 * failures
+        return reward_routability, 0.0, 0.0, 0.0
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)

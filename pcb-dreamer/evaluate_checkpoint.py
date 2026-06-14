@@ -103,7 +103,9 @@ def main():
     outdir.mkdir(exist_ok=True)
 
     env = make_env("eval", 0, seed=eval_seed, num_traces=num_traces,
-                   reward_version=meta.get("reward_version", "v1"))
+                   reward_version=meta.get("reward_version", "v1"),
+                   board_width=meta.get("board_width", 135.0),
+                   board_height=meta.get("board_height", 90.0))
     acts = env.action_space
     config.num_actions = acts.n if hasattr(acts, "n") else acts.shape[0]
 
