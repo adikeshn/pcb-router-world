@@ -229,15 +229,17 @@ def load_te_example(num_traces: int = 10, seed: int = None,
     board.connector_h = _orig_conn_h
 
     # ------------------------------------------------------------------
-    # Starting points — 6 per row × 2 rows = 12 traces, centered on NRZ
+    # Starting points — 3 per row × 2 rows = 6 traces, centered on NRZ.
+    # (3-stacked-on-3 layout. With num_traces=6 this gives two rows of
+    # three rather than a single straight line of six.)
     # Spacing = TRACE_MIN_CENTER_TO_CENTER (1.3286mm), just sufficient
     # for trace-to-trace clearance.
     # ------------------------------------------------------------------
     nrz_cx = nrz_x + nrz_w / 2
-    n_per_row = 6
+    n_per_row = 3
     min_sp = TRACE_MIN_CENTER_TO_CENTER  # 1.3286mm
 
-    # 6 positions centered on the NRZ x-center at minimum spacing
+    # positions centered on the NRZ x-center at minimum spacing
     start_xs = [nrz_cx + (i - (n_per_row - 1) / 2) * min_sp
                 for i in range(n_per_row)]
 
@@ -246,13 +248,13 @@ def load_te_example(num_traces: int = 10, seed: int = None,
     breakout = 0.8626
 
     all_traces = []
-    # Top row: traces 0–5
+    # Top row
     for i, x in enumerate(start_xs):
         all_traces.append(TraceSpec(
             start_x=x, start_y=top_y,
             breakout_length=breakout, index=i,
         ))
-    # Bottom row: traces 6–11
+    # Bottom row
     for i, x in enumerate(start_xs):
         all_traces.append(TraceSpec(
             start_x=x, start_y=bot_y,

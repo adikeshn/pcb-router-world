@@ -220,10 +220,26 @@ class TPPlacementEnv(gym.Env):
             )
         diag = np.hypot(self.board.width, self.board.height)
 
+        # Edge-clearance check: how close routed traces come to the board edge,
+        # and how many traces violate the minimum edge clearance. Used by v3 to
+        # penalize routes that hug / push past the board boundary.
+        edge_violations = 0
+        edge_min = float('inf')
+        try:
+            from envs.routing import validate_routing_constraints
+            vinfo = validate_routing_constraints(self.board, paths)
+            edge_min = vinfo.get("trace_to_edge_min", float('inf'))
+            edge_violations = sum(
+                1 for v in vinfo.get("violations", []) if v[0] == "trace_to_edge"
+            )
+        except Exception:
+            pass
+
         if self.reward_version == "v3":
             (reward_routability, reward_length,
              reward_spread, reward_spacing) = self._reward_v3(
-                failures, n, finite, total_length, spread, min_sp, diag)
+                failures, n, finite, total_length, spread, min_sp, diag,
+                edge_violations)
         elif self.reward_version == "v2":
             (reward_routability, reward_length,
              reward_spread, reward_spacing) = self._reward_v2(
@@ -239,6 +255,8 @@ class TPPlacementEnv(gym.Env):
             "total_length": total_length,
             "length_spread": spread,
             "min_tp_spacing": min_sp,
+            "edge_violations": edge_violations,
+            "min_edge_clearance": edge_min if edge_min != float('inf') else 0.0,
             "reward_routability": reward_routability,
             "reward_length": reward_length,
             "reward_spread": reward_spread,
@@ -306,7 +324,8 @@ class TPPlacementEnv(gym.Env):
 
         return reward_routability, reward_length, reward_spread, reward_spacing
 
-    def _reward_v3(self, failures, n, finite, total_length, spread, min_sp, diag):
+    def _reward_v3(self, failures, n, finite, total_length, spread, min_sp, diag,
+                   edge_violations=0):
         """Length-matching-first reward, with the dropped-trace exploit closed.
 
         IMPORTANT FIX: in the original v3, spread/length/spacing were computed
@@ -345,9 +364,15 @@ class TPPlacementEnv(gym.Env):
             if len(self.placed_tps) > 1:
                 bonus_spacing = 1.0 * min(min_sp / TP_TO_TP_MIN, 1.0)  # up to +1
 
-            # Report terms in the same slots as v1/v2 for logging continuity.
+            # Edge-clearance penalty: discourage routes that hug or cross the
+            # board boundary. Folded into the length term's reported slot.
+            # Capped at -3 so the total quality penalty (spread<=10, length<=1,
+            # edge<=3 -> <=14) still leaves full-route reward >= 20-14 = +6,
+            # which stays above the best partial (1 failure ~ -4.67).
+            pen_edge = 1.5 * min(edge_violations, 2)         # 0, -1.5, or -3
+
             reward_routability = base
-            reward_length = -pen_length
+            reward_length = -(pen_length + pen_edge)
             reward_spread = -pen_spread
             reward_spacing = bonus_spacing
             return reward_routability, reward_length, reward_spread, reward_spacing
