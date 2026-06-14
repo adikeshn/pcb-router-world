@@ -95,6 +95,12 @@ def main():
     parser.add_argument("--diversity_frac", type=float, default=0.5,
                         help="Min fraction of test points that must each be "
                              "relocated for two layouts to be considered distinct.")
+    parser.add_argument("--actor_entropy", type=float, default=None,
+                        help="Override the actor entropy coefficient (config "
+                             "default 3e-3). Higher = more exploration, useful "
+                             "for filling a diverse top-K portfolio; too high "
+                             "stops the policy committing to good layouts. "
+                             "Try ~1e-2 first.")
     # Optional overrides for run-budget knobs, so a named config doesn't
     # need to be edited/duplicated just to change run length.
     parser.add_argument("--steps", type=float, default=None)
@@ -116,6 +122,12 @@ def main():
         override = getattr(args, key)
         if override is not None:
             config[key] = override
+
+    if args.actor_entropy is not None:
+        # config["actor"] is a dict from yaml; override just the entropy coeff.
+        config["actor"] = dict(config["actor"])
+        config["actor"]["entropy"] = args.actor_entropy
+        print(f"Actor entropy coefficient override: {args.actor_entropy}")
 
     commit = get_git_commit()
     if args.logdir is not None:
