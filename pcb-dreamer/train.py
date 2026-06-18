@@ -33,6 +33,7 @@ from envs.dreamer_wrapper import PCBDreamerEnv
 from parallel import Parallel, Dummy
 from dreamer import Dreamer
 from best_solution import DiverseSolutionTracker
+from forced_explore import ForcedExplorer
 
 to_np = lambda x: x.detach().cpu().numpy()
 
@@ -107,6 +108,16 @@ def main():
                         help="Board width in mm (default 135, the TE example).")
     parser.add_argument("--board_height", type=float, default=90.0,
                         help="Board height in mm (default 90, the TE example).")
+    # Forced-exploration: periodic random episodes for portfolio diversity.
+    parser.add_argument("--force_explore_every", type=int, default=1000,
+                        help="Run a forced-random-episode batch every N env steps "
+                             "(0 to disable). Should be a multiple of eval_every "
+                             "so it aligns with training cycles. Default 1000.")
+    parser.add_argument("--force_explore_episodes", type=int, default=200,
+                        help="Number of masked-random episodes per batch. More = "
+                             "denser portfolio coverage per batch. Default 200.")
+    parser.add_argument("--force_explore_start", type=int, default=0,
+                        help="Step at which forced exploration begins (default 0).")
     # Optional overrides for run-budget knobs, so a named config doesn't
     # need to be edited/duplicated just to change run length.
     parser.add_argument("--steps", type=float, default=None)
@@ -185,6 +196,8 @@ def main():
             "reward_version": args.reward_version,
             "board_width": args.board_width,
             "board_height": args.board_height,
+            "force_explore_every": args.force_explore_every,
+            "force_explore_episodes": args.force_explore_episodes,
             "git_commit": commit,
             "created": datetime.now().isoformat(timespec="seconds"),
             "config": {
@@ -271,6 +284,24 @@ def main():
         min_moved_frac=args.diversity_frac,
     )
 
+    # Forced exploration: periodic masked-random episodes that bypass the
+    # learned policy. These feed the portfolio tracker directly without going
+    # into the replay buffer, ensuring the portfolio sees the full board even
+    # when the trained policy has converged to a narrow spatial region.
+    config.force_explore_every = args.force_explore_every
+    config.force_explore_episodes = args.force_explore_episodes
+    config.force_explore_start = args.force_explore_start
+
+    def _make_explore_env():
+        return PCBDreamerEnv(
+            num_traces=args.num_traces, seed=42,
+            reward_version=args.reward_version,
+            board_width=args.board_width,
+            board_height=args.board_height,
+        )
+
+    explorer = ForcedExplorer(logdir, _make_explore_env, config)
+
     def track_episode(env, is_eval):
         status = tracker.update(
             get_inner_env(env), agent._step,
@@ -304,6 +335,17 @@ def main():
             steps=config.eval_every, state=state,
             episode_callback=track_episode,
         )
+
+        # Forced-exploration batch: run masked-random episodes to ensure the
+        # portfolio sees the full board, not just the region the policy favours.
+        if args.force_explore_every > 0:
+            if explorer.should_run(agent._step):
+                print(f"  [explore] running {args.force_explore_episodes} "
+                      f"random episodes @ step {agent._step}...")
+                n_new, n_routable = explorer.run(tracker, agent._step)
+                explorer._last_ran = agent._step
+                print(f"  [explore] done: {n_routable} routable, "
+                      f"{n_new} portfolio updates")
 
         torch.save({
             "agent_state_dict": agent.state_dict(),
