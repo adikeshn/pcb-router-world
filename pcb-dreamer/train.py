@@ -125,6 +125,15 @@ def main():
     parser.add_argument("--eval_every", type=float, default=None)
     parser.add_argument("--eval_episode_num", type=int, default=None)
     parser.add_argument("--log_every", type=float, default=None)
+    # Weights & Biases integration (optional)
+    parser.add_argument("--wandb", action="store_true", default=False,
+                        help="Enable Weights & Biases logging.")
+    parser.add_argument("--wandb_project", type=str, default="pcb-dreamer",
+                        help="wandb project name (default: pcb-dreamer).")
+    parser.add_argument("--wandb_entity", type=str, default=None,
+                        help="wandb entity/team (default: personal account).")
+    parser.add_argument("--wandb_key", type=str, default=None,
+                        help="wandb API key (alternative to WANDB_API_KEY env var).")
     args = parser.parse_args()
 
     # Load config
@@ -208,8 +217,45 @@ def main():
         meta_path.write_text(json.dumps(meta, indent=2, default=str))
     print(f"Run metadata: {meta_path}")
 
+    # Weights & Biases (optional)
+    wandb_run = None
+    if args.wandb:
+        try:
+            import wandb
+            if args.wandb_key:
+                wandb.login(key=args.wandb_key, relogin=True)
+            run_id = logdir.name  # use run dir name as stable id for resume
+            wandb_run = wandb.init(
+                project=args.wandb_project,
+                entity=args.wandb_entity,
+                name=run_id,
+                id=run_id,
+                resume="allow",
+                config={
+                    "configs": args.configs,
+                    "num_traces": args.num_traces,
+                    "seed": args.seed,
+                    "reward_version": args.reward_version,
+                    "board_width": args.board_width,
+                    "board_height": args.board_height,
+                    "top_k": args.top_k,
+                    "diversity_shift": args.diversity_shift,
+                    "diversity_frac": args.diversity_frac,
+                    "force_explore_every": args.force_explore_every,
+                    "force_explore_episodes": args.force_explore_episodes,
+                    "git_commit": commit,
+                    **{k: (str(v) if isinstance(v, pathlib.Path) else v)
+                       for k, v in vars(config).items()},
+                },
+                dir=str(logdir),
+            )
+            print(f"wandb run: {wandb_run.url}")
+        except Exception as e:
+            print(f"[wandb] init failed ({e}), continuing without wandb.")
+            wandb_run = None
+
     step = count_steps(config.traindir)
-    logger = tools.Logger(logdir, config.action_repeat * step)
+    logger = tools.Logger(logdir, config.action_repeat * step, wandb_run=wandb_run)
 
     print("Creating environments...")
     train_envs = [Dummy(make_env("train", i, config.seed, args.num_traces, args.reward_version,
@@ -309,6 +355,13 @@ def main():
         )
         if status:
             print(f"  [solutions] {status}")
+            if wandb_run is not None:
+                best = tracker.solutions[0] if tracker.solutions else None
+                wandb_run.log({
+                    "portfolio/size": len(tracker.solutions),
+                    "portfolio/best_spread": best["length_spread"] if best else float("nan"),
+                    "portfolio/best_total_length": best["total_length"] if best else float("nan"),
+                }, step=agent._step)
 
     while agent._step < config.steps + config.eval_every:
         logger.write()
@@ -346,6 +399,11 @@ def main():
                 explorer._last_ran = agent._step
                 print(f"  [explore] done: {n_routable} routable, "
                       f"{n_new} portfolio updates")
+                if wandb_run is not None:
+                    wandb_run.log({
+                        "explore/routable": n_routable,
+                        "explore/portfolio_updates": n_new,
+                    }, step=agent._step)
 
         torch.save({
             "agent_state_dict": agent.state_dict(),
@@ -363,6 +421,22 @@ def main():
         print(f"  -> {logdir / 'solutions'}/ (solution_*.json + solution_*.png)")
     else:
         print("\nNo fully-routable solution found during training.")
+
+    # Log final portfolio to wandb as a Table
+    if wandb_run is not None and tracker.solutions:
+        try:
+            import wandb
+            cols = ["rank", "length_spread", "total_length_mm", "min_tp_spacing_mm",
+                    "step", "source"]
+            rows = [
+                [i, s["length_spread"], s["total_length"], s["min_tp_spacing"],
+                 s["step"], s["source"]]
+                for i, s in enumerate(tracker.solutions)
+            ]
+            wandb_run.log({"portfolio": wandb.Table(columns=cols, data=rows)})
+        except Exception as e:
+            print(f"[wandb] portfolio table upload failed: {e}")
+        wandb_run.finish()
 
     for env in train_envs + eval_envs:
         try: env.close()

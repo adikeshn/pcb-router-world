@@ -16,6 +16,11 @@ from torch.nn import functional as F
 from torch import distributions as torchd
 from torch.utils.tensorboard import SummaryWriter
 
+try:
+    import wandb as _wandb
+except ImportError:
+    _wandb = None
+
 
 to_np = lambda x: x.detach().cpu().numpy()
 
@@ -55,7 +60,7 @@ class TimeRecording:
 
 
 class Logger:
-    def __init__(self, logdir, step):
+    def __init__(self, logdir, step, wandb_run=None):
         self._logdir = logdir
         self._writer = SummaryWriter(log_dir=str(logdir), max_queue=1000)
         self._last_step = None
@@ -64,6 +69,7 @@ class Logger:
         self._images = {}
         self._videos = {}
         self.step = step
+        self._wandb = wandb_run  # optional wandb.Run; None = disabled
 
     def scalar(self, name, value):
         self._scalars[name] = float(value)
@@ -88,6 +94,8 @@ class Logger:
                 self._writer.add_scalar("scalars/" + name, value, step)
             else:
                 self._writer.add_scalar(name, value, step)
+        if self._wandb is not None:
+            self._wandb.log({k: v for k, v in scalars}, step=step)
         for name, value in self._images.items():
             self._writer.add_image(name, value, step)
         for name, value in self._videos.items():
