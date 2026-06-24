@@ -444,20 +444,28 @@ def load_actual_te_board(
     board.connector_w = 24.0
     board.connector_h = 12.0
 
-    # All 20 trace starting points (1-based index)
+    # All 20 trace starting points (1-based index), exact from CSV.
+    # Bottom row (1-10): y=107.9436. Top row (11-20): y=114.7446.
+    # Note the non-uniform pitch: traces 1-8 and 11-18 are at 0.9mm spacing,
+    # but there is a physical gap in the connector between pins 8 and 9
+    # (and 18 and 19), so traces 9,10,19,20 have a shifted x origin.
     bottom_y = 107.9436
-    top_y = nrz_cy + (nrz_cy - bottom_y)   # mirror through NRZ centre = 114.7844
-    base_x = 58.9442
-    x_step = 0.9   # original connector pitch (NOT re-spaced — exact board values)
+    top_y    = 114.7446   # exact from CSV (not inferred)
+
+    x_positions = {
+        1:  58.9442,  2:  59.8442,  3:  60.7442,  4:  61.6442,
+        5:  62.5442,  6:  63.4442,  7:  64.3442,  8:  65.2442,
+        9:  69.1442,  10: 70.0442,
+        11: 58.9442,  12: 59.8442,  13: 60.7442,  14: 61.6442,
+        15: 62.5442,  16: 63.4442,  17: 64.3442,  18: 65.2442,
+        19: 69.1442,  20: 70.0442,
+    }
 
     all_traces = {}
     for n in range(1, 21):
-        col = (n - 1) % 10
-        row = (n - 1) // 10
-        x = base_x + col * x_step
-        y = bottom_y if row == 0 else top_y
-        all_traces[n] = TraceSpec(start_x=x, start_y=y,
-                                  breakout_length=0.8626,  # from slide
+        y = bottom_y if n <= 10 else top_y
+        all_traces[n] = TraceSpec(start_x=x_positions[n], start_y=y,
+                                  breakout_length=0.8626,
                                   index=n)
 
     board.traces = [all_traces[i] for i in trace_indices if i in all_traces]
