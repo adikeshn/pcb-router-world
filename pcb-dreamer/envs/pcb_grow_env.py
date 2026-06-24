@@ -116,6 +116,7 @@ class TraceGrowEnv(gym.Env):
         seed: int = 0,
         board_width: float = 180.0,
         board_height: float = 120.0,
+        step_mm: float = 3.0,
         render_mode: Optional[str] = None,
     ):
         super().__init__()
@@ -123,6 +124,7 @@ class TraceGrowEnv(gym.Env):
         self._board_seed = seed
         self.img_size = img_size
         self.max_length_mm = max_length_mm
+        self.step_mm = step_mm          # agent step size in mm
 
         if board is None:
             # seed=None -> fixed connector position (single-board search).
@@ -135,14 +137,11 @@ class TraceGrowEnv(gym.Env):
         self.num_traces = min(num_traces, len(self.board.traces))
         self.board.traces = self.board.traces[:self.num_traces]
 
-        # Rounds = how many 1mm extensions each trace gets. After all rounds
-        # every trace is exactly (BREAKOUT_MM + rounds*STEP_MM) long.
-        self.num_rounds = int(round(max_length_mm / STEP_MM))
+        # Rounds = how many step_mm extensions each trace gets.
+        self.num_rounds = int(round(max_length_mm / step_mm))
         # Total agent steps if no trace is ever blocked.
         self.ideal_steps = self.num_rounds * self.num_traces
-        # Hard cap with slack so blocked traces get extra turns to free up
-        # without letting the episode run unbounded. TimeLimit should match
-        # episode_steps. 1.5x gives headroom for occasional blocking.
+        # Hard cap with slack so blocked traces get extra turns to free up.
         self.episode_steps = int(self.ideal_steps * 1.5)
 
         self.action_space = spaces.Discrete(NUM_DIRECTIONS)
@@ -260,14 +259,31 @@ class TraceGrowEnv(gym.Env):
             for k in range(len(path) - 1):
                 self._draw_segment(img, path[k], path[k + 1], 1, val)
 
+        # WHITE start-point markers: draw the trace origin (path[0]) as a
+        # bright cross on ALL three channels so it's visible even inside the
+        # connector rectangle. Engineers use these to verify the breakout.
+        for ti, path in enumerate(self.paths):
+            sx, sy = path[0]
+            px, py = self._w2p(sx, sy)
+            r = max(2, int(1.5 * self._x_scale))
+            for dx in range(-r, r + 1):
+                for dy in range(-r, r + 1):
+                    # cross pattern: either dx or dy near zero (not both)
+                    if abs(dx) <= 1 or abs(dy) <= 1:
+                        ppx, ppy = px + dx, py + dy
+                        if 0 <= ppy < self.img_size and 0 <= ppx < self.img_size:
+                            img[ppy, ppx, 0] = 255
+                            img[ppy, ppx, 1] = 255
+                            img[ppy, ppx, 2] = 255
+
         # BLUE: active tip + its currently-valid next directions
         if self.num_traces:
             tx, ty = self.tips[self.active]
             self._draw_circle(img, tx, ty, 1.5, 2, 255)
             for d in range(NUM_DIRECTIONS):
                 if self.current_mask[d]:
-                    nx = tx + DIRECTIONS[d, 0] * STEP_MM * 2
-                    ny = ty + DIRECTIONS[d, 1] * STEP_MM * 2
+                    nx = tx + DIRECTIONS[d, 0] * self.step_mm * 2
+                    ny = ty + DIRECTIONS[d, 1] * self.step_mm * 2
                     px, py = self._w2p(nx, ny)
                     if 0 <= py < self.img_size and 0 <= px < self.img_size:
                         img[py, px, 2] = min(255, int(img[py, px, 2]) + 120)
@@ -360,8 +376,8 @@ class TraceGrowEnv(gym.Env):
         tx, ty = self.tips[self.active]
         mask = np.zeros(NUM_DIRECTIONS, dtype=bool)
         for d in range(NUM_DIRECTIONS):
-            nx = tx + DIRECTIONS[d, 0] * STEP_MM
-            ny = ty + DIRECTIONS[d, 1] * STEP_MM
+            nx = tx + DIRECTIONS[d, 0] * self.step_mm
+            ny = ty + DIRECTIONS[d, 1] * self.step_mm
             if not self._point_clear_of_static(nx, ny):
                 continue
             if not self._point_clear_of_other_traces(nx, ny, self.active):
@@ -432,7 +448,7 @@ class TraceGrowEnv(gym.Env):
         # length-normalized so all breakouts are exactly equal length. The arc
         # placement guarantees the endpoints are well separated regardless of
         # how tightly the starts are packed.
-        R = BREAKOUT_MM + abs(exit_y - conn_cy)
+        R = BREAKOUT_MM + abs(exit_y - conn_cy)  # breakout arc radius
         arc_span = np.deg2rad(160.0)
         base_ang = (np.pi / 2 if dir_y > 0 else -np.pi / 2)
         raw_paths = {}
@@ -463,7 +479,7 @@ class TraceGrowEnv(gym.Env):
                 rad = np.array([ex - conn_cx, ey - conn_cy])
                 rad = rad / (np.linalg.norm(rad) + 1e-9)
                 raw = raw + [(ex + rad[0] * pad, ey + rad[1] * pad)]
-            path = _densify(raw, STEP_MM)
+            path = _densify(raw, self.step_mm)
             indexed_paths.append((ti, path))
             self.tips[ti] = path[-1]
             vx, vy = path[-1][0] - path[-2][0], path[-1][1] - path[-2][1]
@@ -538,8 +554,8 @@ class TraceGrowEnv(gym.Env):
 
         if action is not None:
             tx, ty = self.tips[self.active]
-            nx = tx + DIRECTIONS[action, 0] * STEP_MM
-            ny = ty + DIRECTIONS[action, 1] * STEP_MM
+            nx = tx + DIRECTIONS[action, 0] * self.step_mm
+            ny = ty + DIRECTIONS[action, 1] * self.step_mm
             self.paths[self.active].append((nx, ny))
             self.tips[self.active] = (nx, ny)
             self.last_dir[self.active] = action

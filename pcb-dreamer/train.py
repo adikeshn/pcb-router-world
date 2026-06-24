@@ -40,12 +40,13 @@ to_np = lambda x: x.detach().cpu().numpy()
 
 def make_env(mode, env_id, seed=0, num_traces=8, reward_version="v1",
              board_width=135.0, board_height=90.0,
-             grow=False, max_length_mm=60.0, img_size=256):
+             grow=False, max_length_mm=60.0, img_size=128, step_mm=3.0):
     if grow:
         from envs.pcb_grow_dreamer import PCBGrowDreamerEnv
         env = PCBGrowDreamerEnv(num_traces=num_traces, seed=seed + env_id,
                                 max_length_mm=max_length_mm, img_size=img_size,
-                                board_width=board_width, board_height=board_height)
+                                board_width=board_width, board_height=board_height,
+                                step_mm=step_mm)
         env = wrappers.OneHotAction(env)
         # Episode length for the growth env is its internal step cap.
         env = wrappers.TimeLimit(env, env._inner.episode_steps)
@@ -130,9 +131,13 @@ def main():
     parser.add_argument("--max_length_mm", type=float, default=60.0,
                         help="(grow mode) Target length each trace grows to. "
                              "Episode length scales with this.")
-    parser.add_argument("--grow_img_size", type=int, default=256,
-                        help="(grow mode) Render resolution. 256 is recommended "
-                             "so 1mm steps are visible; 64 is too coarse.")
+    parser.add_argument("--step_mm", type=float, default=3.0,
+                        help="(grow mode) Agent step size in mm (default 3). "
+                             "3-4mm gives cleaner geometry than 1mm with fewer "
+                             "decisions per episode.")
+    parser.add_argument("--grow_img_size", type=int, default=128,
+                        help="(grow mode) Render resolution (default 128). "
+                             "256 is sharper but uses more GPU memory.")
     # Forced-exploration: periodic random episodes for portfolio diversity.
     parser.add_argument("--force_explore_every", type=int, default=1000,
                         help="Run a forced-random-episode batch every N env steps "
@@ -236,10 +241,10 @@ def main():
         config["decoder"]["cnn_keys"] = "image"
         # Episode length is the growth env's internal step cap; compute it from
         # the same formula the env uses (1.5x ideal). num_rounds = max_length.
-        num_rounds = int(round(args.max_length_mm))
+        num_rounds = int(round(args.max_length_mm / args.step_mm))
         config["time_limit"] = int(num_rounds * args.num_traces * 1.5)
-        print(f"[grow] img={gs}x{gs}, max_length={args.max_length_mm}mm, "
-              f"episode_steps={config['time_limit']}")
+        print(f"[grow] img={gs}x{gs}, step={args.step_mm}mm, max_length={args.max_length_mm}mm, "
+              f"rounds={num_rounds}, episode_steps={config['time_limit']}")
 
     # Convert to namespace
     config = argparse.Namespace(**config)
@@ -327,7 +332,7 @@ def main():
     train_envs = [Dummy(make_env("train", i, config.seed, args.num_traces, args.reward_version,
                                  args.board_width, args.board_height,
                                  grow=args.grow, max_length_mm=args.max_length_mm,
-                                 img_size=args.grow_img_size))
+                                 img_size=args.grow_img_size, step_mm=args.step_mm))
                   for i in range(config.envs)]
     eval_envs = [Dummy(make_env("eval", i, config.seed, args.num_traces, args.reward_version,
                                 args.board_width, args.board_height,
@@ -424,6 +429,7 @@ def main():
                 num_traces=args.num_traces, seed=42,
                 max_length_mm=args.max_length_mm, img_size=args.grow_img_size,
                 board_width=args.board_width, board_height=args.board_height,
+                step_mm=args.step_mm,
             )
         return PCBDreamerEnv(
             num_traces=args.num_traces, seed=42,
