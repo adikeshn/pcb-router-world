@@ -316,15 +316,18 @@ class TraceGrowEnv(gym.Env):
                                for_endpoint: bool = False) -> bool:
         """Board edge + obstacle + connector clearance for a path point.
 
-        During growth (for_endpoint=False) we enforce TRACE_TO_EDGE_MIN so the
-        path stays on-board. At episode end the endpoint must additionally
-        satisfy TP_TO_EDGE_MIN (14mm), which is checked via for_endpoint=True
-        in the terminal reward. The mask also uses TP_TO_EDGE_MIN so the agent
-        can never take a step that would leave it stranded outside the valid
-        endpoint zone — removing the need for the agent to discover this 14mm
-        rule through late-episode penalty alone.
+        During growth (for_endpoint=False) we only enforce TRACE_TO_EDGE_MIN
+        (0.26mm) — traces are free to travel anywhere on the board, including
+        the lower region near the connector, to allow curling behaviour like
+        the reference image shows.
+
+        The terminal endpoint validity check uses TP_TO_EDGE_MIN (14mm) and is
+        handled separately in _terminal_reward via for_endpoint=True. The agent
+        learns this constraint through the terminal reward signal — deliberately
+        not hard-masking it so the agent can route through the lower region on
+        the way to a valid endpoint elsewhere.
         """
-        edge_clear = TP_TO_EDGE_MIN if for_endpoint else TP_TO_EDGE_MIN
+        edge_clear = TP_TO_EDGE_MIN if for_endpoint else TRACE_TO_EDGE_MIN
         if (x - self.board.x_min < edge_clear or
                 self.board.x_max - x < edge_clear or
                 y - self.board.y_min < edge_clear or
@@ -614,7 +617,8 @@ class TraceGrowEnv(gym.Env):
         # Endpoint validity: every endpoint must be a legal test-point location
         # (edge + connector + obstacle clearance), and TP-to-TP spacing met.
         valid_endpoints = all(
-            self._point_clear_of_static(x, y) for x, y in endpoints
+            self._point_clear_of_static(x, y, for_endpoint=True)
+            for x, y in endpoints
         )
         spacing_ok = ep_min >= TP_TO_TP_MIN if self.num_traces > 1 else True
 
