@@ -46,12 +46,13 @@ class PCBGrowDreamerEnv:
 
     def __init__(self, num_traces=8, seed=0, max_length_mm=60.0,
                  img_size=128, board_width=135.0, board_height=90.0,
-                 step_mm=3.0, trace_indices=None):
+                 step_mm=3.0, trace_indices=None, dense_reward_weight=0.005):
         self._inner = TraceGrowEnv(
             num_traces=num_traces, seed=seed,
             max_length_mm=max_length_mm, img_size=img_size,
             board_width=board_width, board_height=board_height,
             step_mm=step_mm, trace_indices=trace_indices,
+            dense_reward_weight=dense_reward_weight,
         )
         self._seed = seed
         self._img_size = img_size

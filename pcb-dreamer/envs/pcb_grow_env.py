@@ -118,6 +118,7 @@ class TraceGrowEnv(gym.Env):
         board_height: float = 90.0,
         step_mm: float = 3.0,
         trace_indices: Optional[List[int]] = None,
+        dense_reward_weight: float = 0.005,
         render_mode: Optional[str] = None,
     ):
         super().__init__()
@@ -125,7 +126,8 @@ class TraceGrowEnv(gym.Env):
         self._board_seed = seed
         self.img_size = img_size
         self.max_length_mm = max_length_mm
-        self.step_mm = step_mm          # agent step size in mm
+        self.step_mm = step_mm
+        self.dense_reward_weight = dense_reward_weight
 
         if board is None:
             # Use the exact TE board by default; trace_indices selects which
@@ -588,9 +590,11 @@ class TraceGrowEnv(gym.Env):
             moved = True
 
         # DENSE reward: current min pairwise distance between tips, normalized
-        # by the target TP spacing. Capped at 1 so it stays well-scaled.
+        # by the target TP spacing. Weight kept low (default 0.005) so the
+        # agent is not strongly penalised for curls that temporarily bring tips
+        # closer together — the terminal reward is the primary signal.
         tip_min = self._min_pairwise(self.tips)
-        reward += 0.05 * min(tip_min / TP_TO_TP_MIN, 1.0)
+        reward += self.dense_reward_weight * min(tip_min / TP_TO_TP_MIN, 1.0)
 
         self.steps_taken += 1
 
@@ -628,7 +632,10 @@ class TraceGrowEnv(gym.Env):
         completed = all_complete and bool(np.all(self.grown >= self.num_rounds))
 
         if completed and valid_endpoints and spacing_ok:
-            reward_spacing = 10.0 * min(ep_min / (2 * TP_TO_TP_MIN), 1.0)
+            # Linear reward on spacing above the minimum — no cap, so the
+            # agent is always incentivised to spread endpoints further.
+            # Normalised so TP_TO_TP_MIN earns 0, 2× earns 10, 4× earns 20.
+            reward_spacing = 10.0 * (ep_min / TP_TO_TP_MIN - 1.0)
             gate = 10.0
         else:
             reward_spacing = 0.0
