@@ -119,6 +119,7 @@ class TraceGrowEnv(gym.Env):
         step_mm: float = 2.0,
         trace_indices: Optional[List[int]] = None,
         dense_reward_weight: float = 0.005,
+        spacing_threshold: float = 5.0,
         render_mode: Optional[str] = None,
     ):
         super().__init__()
@@ -128,6 +129,7 @@ class TraceGrowEnv(gym.Env):
         self.max_length_mm = max_length_mm
         self.step_mm = step_mm
         self.dense_reward_weight = dense_reward_weight
+        self.spacing_threshold = spacing_threshold  # mm, min pairwise endpoint spacing for a valid solution
 
         if board is None:
             # Use the exact TE board by default; trace_indices selects which
@@ -650,7 +652,7 @@ class TraceGrowEnv(gym.Env):
             self._point_clear_of_static(x, y, for_endpoint=True)
             for x, y in endpoints
         )
-        spacing_ok = ep_min >= TP_TO_TP_MIN if self.num_traces > 1 else True
+        spacing_ok = ep_min >= self.spacing_threshold if self.num_traces > 1 else True
 
         # Length equality holds by construction only if every trace completed.
         # If the step cap was hit with some trace boxed in, lengths differ and
@@ -658,10 +660,9 @@ class TraceGrowEnv(gym.Env):
         completed = all_complete and bool(np.all(self.grown >= self.num_rounds))
 
         if completed and valid_endpoints and spacing_ok:
-            # Linear reward on spacing above the minimum — no cap, so the
-            # agent is always incentivised to spread endpoints further.
-            # Normalised so TP_TO_TP_MIN earns 0, 2× earns 10, 4× earns 20.
-            reward_spacing = 10.0 * (ep_min / TP_TO_TP_MIN - 1.0)
+            # Linear reward above the current spacing threshold — always
+            # incentivised to spread further, regardless of threshold value.
+            reward_spacing = 10.0 * (ep_min / self.spacing_threshold - 1.0)
             gate = 10.0
         else:
             reward_spacing = 0.0

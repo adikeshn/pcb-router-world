@@ -41,14 +41,15 @@ to_np = lambda x: x.detach().cpu().numpy()
 def make_env(mode, env_id, seed=0, num_traces=8, reward_version="v1",
              board_width=135.0, board_height=90.0,
              grow=False, max_length_mm=60.0, img_size=128, step_mm=2.0,
-             trace_indices=None, dense_reward_weight=0.005):
+             trace_indices=None, dense_reward_weight=0.005, spacing_threshold=5.0):
     if grow:
         from envs.pcb_grow_dreamer import PCBGrowDreamerEnv
         env = PCBGrowDreamerEnv(num_traces=num_traces, seed=seed + env_id,
                                 max_length_mm=max_length_mm, img_size=img_size,
                                 board_width=board_width, board_height=board_height,
                                 step_mm=step_mm, trace_indices=trace_indices,
-                                dense_reward_weight=dense_reward_weight)
+                                dense_reward_weight=dense_reward_weight,
+                                spacing_threshold=spacing_threshold)
         env = wrappers.OneHotAction(env)
         # Episode length for the growth env is its internal step cap.
         env = wrappers.TimeLimit(env, env._inner.episode_steps)
@@ -349,7 +350,8 @@ def main():
                                  grow=args.grow, max_length_mm=args.max_length_mm,
                                  img_size=args.grow_img_size, step_mm=args.step_mm,
                                  trace_indices=args.trace_indices_list,
-                                 dense_reward_weight=args.dense_reward_weight))
+                                 dense_reward_weight=args.dense_reward_weight,
+                                 spacing_threshold=args.spacing_threshold))
                   for i in range(config.envs)]
     eval_envs = [Dummy(make_env("eval", i, config.seed, args.num_traces, args.reward_version,
                                 args.board_width, args.board_height,
@@ -448,6 +450,7 @@ def main():
                 board_width=args.board_width, board_height=args.board_height,
                 step_mm=args.step_mm, trace_indices=args.trace_indices_list,
                 dense_reward_weight=args.dense_reward_weight,
+                spacing_threshold=args.spacing_threshold,
             )
         return PCBDreamerEnv(
             num_traces=args.num_traces, seed=42,
