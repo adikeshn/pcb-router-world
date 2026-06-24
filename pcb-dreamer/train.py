@@ -39,7 +39,19 @@ to_np = lambda x: x.detach().cpu().numpy()
 
 
 def make_env(mode, env_id, seed=0, num_traces=8, reward_version="v1",
-             board_width=135.0, board_height=90.0):
+             board_width=135.0, board_height=90.0,
+             grow=False, max_length_mm=60.0, img_size=256):
+    if grow:
+        from envs.pcb_grow_dreamer import PCBGrowDreamerEnv
+        env = PCBGrowDreamerEnv(num_traces=num_traces, seed=seed + env_id,
+                                max_length_mm=max_length_mm, img_size=img_size,
+                                board_width=board_width, board_height=board_height)
+        env = wrappers.OneHotAction(env)
+        # Episode length for the growth env is its internal step cap.
+        env = wrappers.TimeLimit(env, env._inner.episode_steps)
+        env = wrappers.SelectAction(env, key="action")
+        env = wrappers.UUID(env)
+        return env
     env = PCBDreamerEnv(num_traces=num_traces, seed=seed + env_id,
                         reward_version=reward_version,
                         board_width=board_width, board_height=board_height)
@@ -108,6 +120,19 @@ def main():
                         help="Board width in mm (default 135, the TE example).")
     parser.add_argument("--board_height", type=float, default=90.0,
                         help="Board height in mm (default 90, the TE example).")
+    # Trace-growth mode: grow every trace 1mm/step (round-robin) instead of
+    # placing endpoints. Length equality is structural; reward is endpoint
+    # spacing. See envs/pcb_grow_env.py.
+    parser.add_argument("--grow", action="store_true", default=False,
+                        help="Use the trace-growth env instead of endpoint "
+                             "placement. Implies a vector trace_id observation "
+                             "and an 8-direction action space.")
+    parser.add_argument("--max_length_mm", type=float, default=60.0,
+                        help="(grow mode) Target length each trace grows to. "
+                             "Episode length scales with this.")
+    parser.add_argument("--grow_img_size", type=int, default=256,
+                        help="(grow mode) Render resolution. 256 is recommended "
+                             "so 1mm steps are visible; 64 is too coarse.")
     # Forced-exploration: periodic random episodes for portfolio diversity.
     parser.add_argument("--force_explore_every", type=int, default=1000,
                         help="Run a forced-random-episode batch every N env steps "
@@ -174,6 +199,25 @@ def main():
         config["device"] = "cpu"
 
     config["time_limit"] = args.num_traces
+
+    # Trace-growth mode reconfigures the observation pipeline: a larger image
+    # (so 1mm steps are visible) plus a trace_id vector the encoder must read.
+    if args.grow:
+        gs = args.grow_img_size
+        config["size"] = [gs, gs]
+        # Encoder/decoder must consume the image AND the trace_id vector.
+        config["encoder"] = dict(config["encoder"])
+        config["decoder"] = dict(config["decoder"])
+        config["encoder"]["mlp_keys"] = "trace_id"
+        config["encoder"]["cnn_keys"] = "image"
+        config["decoder"]["mlp_keys"] = "trace_id"
+        config["decoder"]["cnn_keys"] = "image"
+        # Episode length is the growth env's internal step cap; compute it from
+        # the same formula the env uses (1.5x ideal). num_rounds = max_length.
+        num_rounds = int(round(args.max_length_mm))
+        config["time_limit"] = int(num_rounds * args.num_traces * 1.5)
+        print(f"[grow] img={gs}x{gs}, max_length={args.max_length_mm}mm, "
+              f"episode_steps={config['time_limit']}")
 
     # Convert to namespace
     config = argparse.Namespace(**config)
@@ -259,10 +303,14 @@ def main():
 
     print("Creating environments...")
     train_envs = [Dummy(make_env("train", i, config.seed, args.num_traces, args.reward_version,
-                                 args.board_width, args.board_height))
+                                 args.board_width, args.board_height,
+                                 grow=args.grow, max_length_mm=args.max_length_mm,
+                                 img_size=args.grow_img_size))
                   for i in range(config.envs)]
     eval_envs = [Dummy(make_env("eval", i, config.seed, args.num_traces, args.reward_version,
-                                args.board_width, args.board_height))
+                                args.board_width, args.board_height,
+                                grow=args.grow, max_length_mm=args.max_length_mm,
+                                img_size=args.grow_img_size))
                  for i in range(config.envs)]
 
     acts = train_envs[0].action_space
@@ -323,12 +371,21 @@ def main():
     # Diverse top-K solution tracker: this run trains on a single fixed board,
     # so the whole run is a search. Keep the best K *distinct* valid layouts
     # found across all episodes (train + eval), a portfolio of alternatives.
-    tracker = DiverseSolutionTracker(
-        logdir, get_inner_env(train_envs[0]).board,
-        k=args.top_k,
-        min_point_shift=args.diversity_shift,
-        min_moved_frac=args.diversity_frac,
-    )
+    if args.grow:
+        from grow_solution import DiverseGrowTracker
+        tracker = DiverseGrowTracker(
+            logdir, get_inner_env(train_envs[0]).board,
+            k=args.top_k,
+            min_point_shift=args.diversity_shift,
+            min_moved_frac=args.diversity_frac,
+        )
+    else:
+        tracker = DiverseSolutionTracker(
+            logdir, get_inner_env(train_envs[0]).board,
+            k=args.top_k,
+            min_point_shift=args.diversity_shift,
+            min_moved_frac=args.diversity_frac,
+        )
 
     # Forced exploration: periodic masked-random episodes that bypass the
     # learned policy. These feed the portfolio tracker directly without going
@@ -339,6 +396,13 @@ def main():
     config.force_explore_start = args.force_explore_start
 
     def _make_explore_env():
+        if args.grow:
+            from envs.pcb_grow_dreamer import PCBGrowDreamerEnv
+            return PCBGrowDreamerEnv(
+                num_traces=args.num_traces, seed=42,
+                max_length_mm=args.max_length_mm, img_size=args.grow_img_size,
+                board_width=args.board_width, board_height=args.board_height,
+            )
         return PCBDreamerEnv(
             num_traces=args.num_traces, seed=42,
             reward_version=args.reward_version,
@@ -359,7 +423,7 @@ def main():
                 best = tracker.solutions[0] if tracker.solutions else None
                 wandb_run.log({
                     "portfolio/size": len(tracker.solutions),
-                    "portfolio/best_spread": best["length_spread"] if best else float("nan"),
+                    "portfolio/best_spacing": best["min_tp_spacing"] if best else float("nan"),
                     "portfolio/best_total_length": best["total_length"] if best else float("nan"),
                 }, step=agent._step)
 

@@ -78,8 +78,11 @@ class ForcedExplorer:
                     probs = mask / mask.sum()
                     action_idx = rng.choice(len(mask), p=probs)
                 else:
-                    # Fallback: uniform over all (shouldn't happen with real boards)
-                    action_idx = rng.randint(env._inner.num_candidates)
+                    # Fallback: uniform over the action space size.
+                    n_act = getattr(env._inner, "num_candidates", None)
+                    if n_act is None:
+                        n_act = len(mask) if mask is not None else 8
+                    action_idx = rng.randint(n_act)
                 obs, _reward, done, _info = env.step(action_idx)
 
             # Feed to tracker (reuses the same diversity filter)
@@ -87,7 +90,9 @@ class ForcedExplorer:
             if status:
                 n_new += 1
             m = env._inner._terminal_metrics
-            if m and m.get("failures", 1) == 0:
+            # Old env reports "failures" (0 = routable); grow env reports
+            # "routable" (1.0 = complete + valid). Accept either.
+            if m and (m.get("failures", 1) == 0 or m.get("routable", 0.0) == 1.0):
                 n_routable += 1
 
         env.close()
