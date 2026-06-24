@@ -263,7 +263,7 @@ def main():
         # the same formula the env uses (1.5x ideal). num_rounds = max_length.
         num_rounds = int(round(args.max_length_mm / args.step_mm))
         n_traces_actual = len(args.trace_indices_list) if args.trace_indices_list else args.num_traces
-        config["time_limit"] = int(num_rounds * n_traces_actual * 1.5)
+        config["time_limit"] = int(num_rounds * n_traces_actual * 3)  # matches env's 3x cap
         print(f"[grow] img={gs}x{gs}, step={args.step_mm}mm, max_length={args.max_length_mm}mm, "
               f"rounds={num_rounds}, episode_steps={config['time_limit']}")
 
