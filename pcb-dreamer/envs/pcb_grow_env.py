@@ -312,13 +312,23 @@ class TraceGrowEnv(gym.Env):
     # validity / masking
     # ------------------------------------------------------------------
 
-    def _point_clear_of_static(self, x: float, y: float) -> bool:
-        """Board edge + obstacle + connector clearance for a path point."""
-        # Edge clearance (use trace-to-edge, the routing clearance, not TP).
-        if (x - self.board.x_min < TRACE_TO_EDGE_MIN or
-                self.board.x_max - x < TRACE_TO_EDGE_MIN or
-                y - self.board.y_min < TRACE_TO_EDGE_MIN or
-                self.board.y_max - y < TRACE_TO_EDGE_MIN):
+    def _point_clear_of_static(self, x: float, y: float,
+                               for_endpoint: bool = False) -> bool:
+        """Board edge + obstacle + connector clearance for a path point.
+
+        During growth (for_endpoint=False) we enforce TRACE_TO_EDGE_MIN so the
+        path stays on-board. At episode end the endpoint must additionally
+        satisfy TP_TO_EDGE_MIN (14mm), which is checked via for_endpoint=True
+        in the terminal reward. The mask also uses TP_TO_EDGE_MIN so the agent
+        can never take a step that would leave it stranded outside the valid
+        endpoint zone — removing the need for the agent to discover this 14mm
+        rule through late-episode penalty alone.
+        """
+        edge_clear = TP_TO_EDGE_MIN if for_endpoint else TP_TO_EDGE_MIN
+        if (x - self.board.x_min < edge_clear or
+                self.board.x_max - x < edge_clear or
+                y - self.board.y_min < edge_clear or
+                self.board.y_max - y < edge_clear):
             return False
 
         # Connector outline clearance
