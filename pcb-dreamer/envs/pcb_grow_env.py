@@ -57,7 +57,7 @@ import numpy as np
 from typing import Optional, List, Tuple
 
 from envs.board import (
-    BoardSpec, load_te_example,
+    BoardSpec, load_te_example, load_actual_te_board,
     TRACE_TO_EDGE_MIN, TRACE_TO_TRACE_MIN, TRACE_WIDTH,
     TP_TO_TP_MIN, TP_TO_EDGE_MIN, TP_TO_CONNECTOR_MIN,
 )
@@ -110,13 +110,14 @@ class TraceGrowEnv(gym.Env):
     def __init__(
         self,
         board: Optional[BoardSpec] = None,
-        num_traces: int = 6,
+        num_traces: int = 8,
         max_length_mm: float = 60.0,
         img_size: int = DEFAULT_IMG_SIZE,
         seed: int = 0,
-        board_width: float = 180.0,
-        board_height: float = 120.0,
+        board_width: float = 135.0,
+        board_height: float = 90.0,
         step_mm: float = 3.0,
+        trace_indices: Optional[List[int]] = None,
         render_mode: Optional[str] = None,
     ):
         super().__init__()
@@ -127,13 +128,14 @@ class TraceGrowEnv(gym.Env):
         self.step_mm = step_mm          # agent step size in mm
 
         if board is None:
-            # seed=None -> fixed connector position (single-board search).
-            board = load_te_example(num_traces=num_traces, seed=None,
-                                    board_width=board_width,
-                                    board_height=board_height)
+            # Use the exact TE board by default; trace_indices selects which
+            # physical pins to route (1-based, default [1,2,3,4,11,12,13,14]).
+            board = load_actual_te_board(
+                trace_indices=trace_indices or [1, 2, 3, 4, 11, 12, 13, 14]
+            )
         self.board = board
-        # The growth env does not depend on board.traces beyond their start
-        # points; it can use as many traces as the board provides.
+        # num_traces is the count of traces we actually route, capped by
+        # how many the board defines.
         self.num_traces = min(num_traces, len(self.board.traces))
         self.board.traces = self.board.traces[:self.num_traces]
 

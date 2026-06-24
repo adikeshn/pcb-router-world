@@ -40,13 +40,14 @@ to_np = lambda x: x.detach().cpu().numpy()
 
 def make_env(mode, env_id, seed=0, num_traces=8, reward_version="v1",
              board_width=135.0, board_height=90.0,
-             grow=False, max_length_mm=60.0, img_size=128, step_mm=3.0):
+             grow=False, max_length_mm=60.0, img_size=128, step_mm=3.0,
+             trace_indices=None):
     if grow:
         from envs.pcb_grow_dreamer import PCBGrowDreamerEnv
         env = PCBGrowDreamerEnv(num_traces=num_traces, seed=seed + env_id,
                                 max_length_mm=max_length_mm, img_size=img_size,
                                 board_width=board_width, board_height=board_height,
-                                step_mm=step_mm)
+                                step_mm=step_mm, trace_indices=trace_indices)
         env = wrappers.OneHotAction(env)
         # Episode length for the growth env is its internal step cap.
         env = wrappers.TimeLimit(env, env._inner.episode_steps)
@@ -135,6 +136,10 @@ def main():
                         help="(grow mode) Agent step size in mm (default 3). "
                              "3-4mm gives cleaner geometry than 1mm with fewer "
                              "decisions per episode.")
+    parser.add_argument("--trace_indices", type=str, default="1,2,3,4,11,12,13,14",
+                        help="(grow mode) Comma-separated 1-based trace indices "
+                             "from the actual TE board to route "
+                             "(default: 1,2,3,4,11,12,13,14 — left cluster, both rows).")
     parser.add_argument("--grow_img_size", type=int, default=128,
                         help="(grow mode) Render resolution (default 128). "
                              "256 is sharper but uses more GPU memory.")
@@ -176,6 +181,9 @@ def main():
     parser.add_argument("--wandb_key", type=str, default=None,
                         help="wandb API key (alternative to WANDB_API_KEY env var).")
     args = parser.parse_args()
+
+    # Parse trace_indices string to list of ints
+    args.trace_indices_list = [int(x.strip()) for x in args.trace_indices.split(",") if x.strip()]
 
     # Load config
     config_path = pathlib.Path(__file__).parent / "configs.yaml"
@@ -242,7 +250,8 @@ def main():
         # Episode length is the growth env's internal step cap; compute it from
         # the same formula the env uses (1.5x ideal). num_rounds = max_length.
         num_rounds = int(round(args.max_length_mm / args.step_mm))
-        config["time_limit"] = int(num_rounds * args.num_traces * 1.5)
+        n_traces_actual = len(args.trace_indices_list) if args.trace_indices_list else args.num_traces
+        config["time_limit"] = int(num_rounds * n_traces_actual * 1.5)
         print(f"[grow] img={gs}x{gs}, step={args.step_mm}mm, max_length={args.max_length_mm}mm, "
               f"rounds={num_rounds}, episode_steps={config['time_limit']}")
 
@@ -332,7 +341,8 @@ def main():
     train_envs = [Dummy(make_env("train", i, config.seed, args.num_traces, args.reward_version,
                                  args.board_width, args.board_height,
                                  grow=args.grow, max_length_mm=args.max_length_mm,
-                                 img_size=args.grow_img_size, step_mm=args.step_mm))
+                                 img_size=args.grow_img_size, step_mm=args.step_mm,
+                                 trace_indices=args.trace_indices_list))
                   for i in range(config.envs)]
     eval_envs = [Dummy(make_env("eval", i, config.seed, args.num_traces, args.reward_version,
                                 args.board_width, args.board_height,
@@ -429,7 +439,7 @@ def main():
                 num_traces=args.num_traces, seed=42,
                 max_length_mm=args.max_length_mm, img_size=args.grow_img_size,
                 board_width=args.board_width, board_height=args.board_height,
-                step_mm=args.step_mm,
+                step_mm=args.step_mm, trace_indices=args.trace_indices_list,
             )
         return PCBDreamerEnv(
             num_traces=args.num_traces, seed=42,

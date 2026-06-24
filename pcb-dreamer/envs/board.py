@@ -354,3 +354,111 @@ def check_tp_spacing(placed_tps: List[Tuple[float, float]], x: float, y: float) 
         if dist < TP_TO_TP_MIN:
             return False
     return True
+
+def load_actual_te_board(
+    trace_indices: List[int] = None,
+) -> BoardSpec:
+    """
+    Load the EXACT TE AutoLayout Example01 board from the slide spec.
+
+    All coordinates taken directly from the PowerPoint slides:
+      - Board: bottom-left (0, 98.2), width=135, height=90
+      - Non-routing zone: BL (58.294, 108.044), w=17.8, h=6.64
+      - UPTH 1: center (58.194, 105.894), dia=1.9
+      - UPTH 2: center (76.194, 105.894), dia=1.9
+      - Tab Pad 1: BL (56.151, 113.346), w=1.526, h=1.216
+      - Tab Pad 2: BL (76.711, 113.346), w=1.526, h=1.216
+      - Traces 1-10 (bottom row): y=107.9436, x = 58.9442 + (n-1)*0.9
+      - Traces 11-20 (top row):   y=114.7844, x = 58.9442 + (n-1)*0.9
+        (top y inferred by mirroring through NRZ center; matches diagram)
+
+    Args:
+        trace_indices: 1-based list of traces to include, e.g. [1,2,3,4,11,12,13,14].
+                       Default: [1,2,3,4,11,12,13,14].
+
+    Returns:
+        BoardSpec with exact geometry, no randomisation, no re-spacing.
+    """
+    if trace_indices is None:
+        trace_indices = [1, 2, 3, 4, 11, 12, 13, 14]
+
+    board = BoardSpec(
+        origin_x=0.0,
+        origin_y=98.2,
+        width=135.0,
+        height=90.0,
+    )
+
+    # Non-routing zone (treated as a rectangular obstacle)
+    nrz_bl_x, nrz_bl_y = 58.294, 108.044
+    nrz_w, nrz_h = 17.8, 6.64
+    nrz_cx = nrz_bl_x + nrz_w / 2
+    nrz_cy = nrz_bl_y + nrz_h / 2
+    board.rect_obstacles.append(Obstacle(
+        cx=nrz_cx, cy=nrz_cy,
+        width=nrz_w, height=nrz_h,
+        clearance=0.0,   # zero extra clearance; hard boundary
+        name="NRZ",
+    ))
+
+    # Tab Pad 1
+    tp1_cx = 56.151 + 1.526 / 2
+    tp1_cy = 113.346 + 1.216 / 2
+    board.rect_obstacles.append(Obstacle(
+        cx=tp1_cx, cy=tp1_cy,
+        width=1.526, height=1.216,
+        clearance=TRACE_TO_TABPAD_MIN,
+        name="TabPad1",
+    ))
+
+    # Tab Pad 2
+    tp2_cx = 76.711 + 1.526 / 2
+    tp2_cy = 113.346 + 1.216 / 2
+    board.rect_obstacles.append(Obstacle(
+        cx=tp2_cx, cy=tp2_cy,
+        width=1.526, height=1.216,
+        clearance=TRACE_TO_TABPAD_MIN,
+        name="TabPad2",
+    ))
+
+    # UPTH 1 (circular, use radius + drill-to-trace clearance)
+    board.circ_obstacles.append(CircularObstacle(
+        cx=58.194, cy=105.894,
+        radius=1.9 / 2,
+        clearance=TRACE_TO_UPTH_MIN,
+        name="UPTH1",
+    ))
+
+    # UPTH 2
+    board.circ_obstacles.append(CircularObstacle(
+        cx=76.194, cy=105.894,
+        radius=1.9 / 2,
+        clearance=TRACE_TO_UPTH_MIN,
+        name="UPTH2",
+    ))
+
+    # Connector outline: encloses NRZ + tab pads + UPTHs with a small margin.
+    # Used for TP_TO_CONNECTOR_MIN clearance on test-point endpoints.
+    board.connector_x = 55.0
+    board.connector_y = 104.5
+    board.connector_w = 24.0
+    board.connector_h = 12.0
+
+    # All 20 trace starting points (1-based index)
+    bottom_y = 107.9436
+    top_y = nrz_cy + (nrz_cy - bottom_y)   # mirror through NRZ centre = 114.7844
+    base_x = 58.9442
+    x_step = 0.9   # original connector pitch (NOT re-spaced — exact board values)
+
+    all_traces = {}
+    for n in range(1, 21):
+        col = (n - 1) % 10
+        row = (n - 1) // 10
+        x = base_x + col * x_step
+        y = bottom_y if row == 0 else top_y
+        all_traces[n] = TraceSpec(start_x=x, start_y=y,
+                                  breakout_length=0.8626,  # from slide
+                                  index=n)
+
+    board.traces = [all_traces[i] for i in trace_indices if i in all_traces]
+    return board
