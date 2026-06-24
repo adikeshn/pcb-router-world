@@ -146,7 +146,8 @@ class TraceGrowEnv(gym.Env):
         # Total agent steps if no trace is ever blocked.
         self.ideal_steps = self.num_rounds * self.num_traces
         # Hard cap with slack so blocked traces get extra turns to free up.
-        self.episode_steps = int(self.ideal_steps * 1.5)
+        # 3x headroom so temporarily-blocked traces can recover.
+        self.episode_steps = int(self.ideal_steps * 3)
 
         self.action_space = spaces.Discrete(NUM_DIRECTIONS)
         self.observation_space = spaces.Box(
@@ -365,22 +366,26 @@ class TraceGrowEnv(gym.Env):
 
     def _point_clear_of_other_traces(self, x: float, y: float,
                                      active: int) -> bool:
-        """Path-level clearance: (x,y) must stay TRACE_PATH_CLEARANCE away from
-        every segment of every OTHER trace, and from earlier (non-adjacent)
-        points of its own path."""
+        """Path-level clearance: (x,y) must stay TRACE_PATH_CLEARANCE away
+        from recent segments of every other trace and early segments of own
+        path. Only checks the last LOOKBACK segments for efficiency."""
+        LOOKBACK = 15  # check this many recent segments per trace
         for ti, path in enumerate(self.paths):
             if len(path) < 2:
-                # Still guard against the lone start point of another trace.
                 if ti != active and path:
                     if np.hypot(x - path[0][0], y - path[0][1]) < TRACE_PATH_CLEARANCE:
                         return False
                 continue
-            # For the active trace, skip the last couple of points (the tip and
-            # its immediate predecessor) so we don't self-collide trivially.
-            seg_end = len(path) - 1
             if ti == active:
+                # For own trace: skip the very tip (last 2 points) to avoid
+                # trivial self-collision, check a few earlier segments
                 seg_end = max(0, len(path) - 3)
-            for k in range(seg_end):
+                seg_start = max(0, seg_end - LOOKBACK)
+            else:
+                # For other traces: check the most recent LOOKBACK segments
+                seg_end = len(path) - 1
+                seg_start = max(0, seg_end - LOOKBACK)
+            for k in range(seg_start, seg_end):
                 if self._point_seg_dist(x, y, path[k], path[k + 1]) < TRACE_PATH_CLEARANCE:
                     return False
         return True
@@ -476,7 +481,7 @@ class TraceGrowEnv(gym.Env):
         # placement guarantees the endpoints are well separated regardless of
         # how tightly the starts are packed.
         R = BREAKOUT_MM + abs(exit_y - conn_cy)  # breakout arc radius
-        arc_span = np.deg2rad(160.0)
+        arc_span = np.deg2rad(120.0)  # narrower than 160: keeps corner traces away from walls
         base_ang = (np.pi / 2 if dir_y > 0 else -np.pi / 2)
         raw_paths = {}
         for rank, ti in enumerate(order):
@@ -502,10 +507,10 @@ class TraceGrowEnv(gym.Env):
             pad = max_blen - blen
             if pad > 1e-6:
                 ex, ey = raw[-1]
-                # extend along the outward radial so padding keeps the fan shape
-                rad = np.array([ex - conn_cx, ey - conn_cy])
-                rad = rad / (np.linalg.norm(rad) + 1e-9)
-                raw = raw + [(ex + rad[0] * pad, ey + rad[1] * pad)]
+                # Extend upward (along the roomy axis) rather than along the
+                # outward radial. Radial extension pushes corner traces further
+                # into corners; upward extension keeps all tips in the safe zone.
+                raw = raw + [(ex, ey + dir_y * pad)]
             path = _densify(raw, self.step_mm)
             indexed_paths.append((ti, path))
             self.tips[ti] = path[-1]
