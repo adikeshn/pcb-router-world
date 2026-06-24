@@ -40,7 +40,7 @@ to_np = lambda x: x.detach().cpu().numpy()
 
 def make_env(mode, env_id, seed=0, num_traces=8, reward_version="v1",
              board_width=135.0, board_height=90.0,
-             grow=False, max_length_mm=60.0, img_size=128, step_mm=3.0,
+             grow=False, max_length_mm=60.0, img_size=128, step_mm=2.0,
              trace_indices=None, dense_reward_weight=0.005):
     if grow:
         from envs.pcb_grow_dreamer import PCBGrowDreamerEnv
@@ -133,8 +133,8 @@ def main():
     parser.add_argument("--max_length_mm", type=float, default=60.0,
                         help="(grow mode) Target length each trace grows to. "
                              "Episode length scales with this.")
-    parser.add_argument("--step_mm", type=float, default=3.0,
-                        help="(grow mode) Agent step size in mm (default 3). "
+    parser.add_argument("--step_mm", type=float, default=2.0,
+                        help="(grow mode) Agent step size in mm (default 2). "
                              "3-4mm gives cleaner geometry than 1mm with fewer "
                              "decisions per episode.")
     parser.add_argument("--dense_reward_weight", type=float, default=0.005,

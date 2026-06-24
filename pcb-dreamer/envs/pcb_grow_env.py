@@ -116,7 +116,7 @@ class TraceGrowEnv(gym.Env):
         seed: int = 0,
         board_width: float = 135.0,
         board_height: float = 90.0,
-        step_mm: float = 3.0,
+        step_mm: float = 2.0,
         trace_indices: Optional[List[int]] = None,
         dense_reward_weight: float = 0.005,
         render_mode: Optional[str] = None,
@@ -330,6 +330,9 @@ class TraceGrowEnv(gym.Env):
         not hard-masking it so the agent can route through the lower region on
         the way to a valid endpoint elsewhere.
         """
+        # Use the full 14mm spec clearance for endpoints. With 2mm steps
+        # (the recommended step_mm), the grid quantization error is ≤2mm,
+        # so valid endpoint positions are always reachable.
         edge_clear = TP_TO_EDGE_MIN if for_endpoint else TRACE_TO_EDGE_MIN
         if (x - self.board.x_min < edge_clear or
                 self.board.x_max - x < edge_clear or
@@ -369,7 +372,7 @@ class TraceGrowEnv(gym.Env):
         """Path-level clearance: (x,y) must stay TRACE_PATH_CLEARANCE away
         from recent segments of every other trace and early segments of own
         path. Only checks the last LOOKBACK segments for efficiency."""
-        LOOKBACK = 15  # check this many recent segments per trace
+        LOOKBACK = 8  # check this many recent segments per trace
         for ti, path in enumerate(self.paths):
             if len(path) < 2:
                 if ti != active and path:
@@ -594,12 +597,30 @@ class TraceGrowEnv(gym.Env):
             self.grown[self.active] += 1
             moved = True
 
-        # DENSE reward: current min pairwise distance between tips, normalized
-        # by the target TP spacing. Weight kept low (default 0.005) so the
-        # agent is not strongly penalised for curls that temporarily bring tips
-        # closer together — the terminal reward is the primary signal.
+        # DENSE reward: two components, both per-step.
+        #
+        # 1. Tip spacing: reward traces spreading apart. Weight kept low so
+        #    the agent is not strongly penalised for curls that temporarily
+        #    bring tips closer together.
         tip_min = self._min_pairwise(self.tips)
         reward += self.dense_reward_weight * min(tip_min / TP_TO_TP_MIN, 1.0)
+        #
+        # 2. Edge proximity penalty: penalise the ACTIVE tip being within
+        #    TP_TO_EDGE_MIN (14mm) of any board edge. This gives a per-step
+        #    gradient signal teaching the policy to stay in the valid endpoint
+        #    zone during growth, without hard-masking it (which would prevent
+        #    the desired curling behaviour through the lower board region).
+        #    Weight matches dense_reward_weight so the two signals are balanced.
+        tx, ty = self.tips[self.active]
+        edge_margin = min(
+            tx - self.board.x_min,
+            self.board.x_max - tx,
+            ty - self.board.y_min,
+            self.board.y_max - ty,
+        )
+        if edge_margin < TP_TO_EDGE_MIN:
+            penalty = (edge_margin - TP_TO_EDGE_MIN) / TP_TO_EDGE_MIN
+            reward += self.dense_reward_weight * penalty
 
         self.steps_taken += 1
 
