@@ -150,6 +150,17 @@ def main():
     parser.add_argument("--eval_every", type=float, default=None)
     parser.add_argument("--eval_episode_num", type=int, default=None)
     parser.add_argument("--log_every", type=float, default=None)
+    # Memory-control overrides (important for high-res grow mode on small GPUs).
+    parser.add_argument("--batch_size", type=int, default=None,
+                        help="World-model training batch size (config default "
+                             "16). Lower to fit high-res images on small GPUs.")
+    parser.add_argument("--batch_length", type=int, default=None,
+                        help="World-model training sequence length (config "
+                             "default 32). Lower to reduce memory.")
+    parser.add_argument("--cnn_depth", type=int, default=None,
+                        help="Base CNN channel depth for encoder/decoder "
+                             "(config default 32). Lower (e.g. 16) cuts memory "
+                             "substantially at high render resolution.")
     # Weights & Biases integration (optional)
     parser.add_argument("--wandb", action="store_true", default=False,
                         help="Enable Weights & Biases logging.")
@@ -173,6 +184,17 @@ def main():
         override = getattr(args, key)
         if override is not None:
             config[key] = override
+
+    # Memory-control overrides.
+    if args.batch_size is not None:
+        config["batch_size"] = args.batch_size
+    if args.batch_length is not None:
+        config["batch_length"] = args.batch_length
+    if args.cnn_depth is not None:
+        config["encoder"] = dict(config["encoder"])
+        config["decoder"] = dict(config["decoder"])
+        config["encoder"]["cnn_depth"] = args.cnn_depth
+        config["decoder"]["cnn_depth"] = args.cnn_depth
 
     if args.actor_entropy is not None:
         # config["actor"] is a dict from yaml; override just the entropy coeff.
