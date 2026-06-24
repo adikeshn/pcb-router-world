@@ -259,16 +259,26 @@ class TraceGrowEnv(gym.Env):
             for k in range(len(path) - 1):
                 self._draw_segment(img, path[k], path[k + 1], 1, val)
 
-        # WHITE start-point markers: draw the trace origin (path[0]) as a
-        # bright cross on ALL three channels so it's visible even inside the
-        # connector rectangle. Engineers use these to verify the breakout.
+        # BREAKOUT TIP markers: draw a white cross at the point where the fixed
+        # breakout ends and the agent takes over. This is more useful than
+        # marking the actual pin origins (which are sub-pixel at this scale and
+        # buried inside the connector). Uses all 3 channels so it's visible over
+        # the connector and any trace color.
         for ti, path in enumerate(self.paths):
-            sx, sy = path[0]
-            px, py = self._w2p(sx, sy)
+            # The breakout is the fixed prefix; the agent starts at path[-1]
+            # initially (before any growth), but we mark the tip after breakout
+            # which is path[-1] at reset time. Since we only call this during
+            # or after episodes, use the first point beyond the connector exit —
+            # approximately the last point of the densified breakout, i.e. the
+            # current tip before any agent moves. We store the breakout length
+            # so we know the split: it's len(path) - grown[ti] points from start.
+            breakout_end_idx = len(path) - int(self.grown[ti])
+            breakout_end_idx = max(0, min(breakout_end_idx, len(path) - 1))
+            bx, by = path[breakout_end_idx]
+            px, py = self._w2p(bx, by)
             r = max(2, int(1.5 * self._x_scale))
             for dx in range(-r, r + 1):
                 for dy in range(-r, r + 1):
-                    # cross pattern: either dx or dy near zero (not both)
                     if abs(dx) <= 1 or abs(dy) <= 1:
                         ppx, ppy = px + dx, py + dy
                         if 0 <= ppy < self.img_size and 0 <= ppx < self.img_size:

@@ -170,7 +170,13 @@ class DiverseGrowTracker:
         if b.connector_w > 0:
             ax.add_patch(plt.Rectangle((b.connector_x, b.connector_y),
                                        b.connector_w, b.connector_h,
-                                       fill=True, color="violet", alpha=0.3))
+                                       fill=True, color="violet", alpha=0.3,
+                                       zorder=2))
+            # outline so it's distinct from traces
+            ax.add_patch(plt.Rectangle((b.connector_x, b.connector_y),
+                                       b.connector_w, b.connector_h,
+                                       fill=False, edgecolor="purple",
+                                       linewidth=1.5, linestyle="--", zorder=3))
         # obstacles
         for obs in b.rect_obstacles:
             xn, yn, xx, yx = obs.bounds
@@ -183,14 +189,21 @@ class DiverseGrowTracker:
         cmap = plt.get_cmap("tab10")
         for ti, path in enumerate(s["paths"]):
             arr = np.array(path)
-            ax.plot(arr[:, 0], arr[:, 1], "-", color=cmap(ti % 10), lw=1.5)
+            ax.plot(arr[:, 0], arr[:, 1], "-", color=cmap(ti % 10), lw=1.5, zorder=4)
             # endpoint (test-point) — large filled circle
             ax.plot(arr[-1, 0], arr[-1, 1], "o", color=cmap(ti % 10),
-                    markersize=9, markeredgecolor="k")
-            # start point — white square marker so it's visible over connector
-            ax.plot(arr[0, 0], arr[0, 1], "s", color="white",
-                    markersize=6, markeredgecolor=cmap(ti % 10), markeredgewidth=1.5,
-                    zorder=5)
+                    markersize=9, markeredgecolor="k", zorder=6)
+            # pin origin inside connector — tiny dot (may overlap others)
+            ax.plot(arr[0, 0], arr[0, 1], ".", color=cmap(ti % 10),
+                    markersize=4, zorder=5)
+
+        # Mark connector pin cluster with a single label rather than per-trace
+        # markers (all pins are within ~3mm of each other, sub-pixel at board scale)
+        conn_cx = b.connector_x + b.connector_w / 2
+        conn_cy = b.connector_y + b.connector_h / 2
+        ax.annotate("pins", xy=(conn_cx, conn_cy),
+                    fontsize=7, color="purple", ha="center", va="center",
+                    fontweight="bold", zorder=7)
         ax.set_xlim(b.x_min - 5, b.x_max + 5)
         ax.set_ylim(b.y_min - 5, b.y_max + 5)
         ax.set_aspect("equal")
