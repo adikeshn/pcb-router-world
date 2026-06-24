@@ -138,6 +138,11 @@ def main():
                         help="(grow mode) Agent step size in mm (default 2). "
                              "3-4mm gives cleaner geometry than 1mm with fewer "
                              "decisions per episode.")
+    parser.add_argument("--spacing_threshold", type=float, default=4.0,
+                        help="(grow mode) Minimum pairwise endpoint spacing "
+                             "for a valid solution (default 4mm). Start low "
+                             "so random policy seeds positive reward; raise "
+                             "toward 13mm across curriculum runs.")
     parser.add_argument("--dense_reward_weight", type=float, default=0.005,
                         help="(grow mode) Weight on the per-step tip-spacing "
                              "reward (default 0.005). Lower = less penalty for "
