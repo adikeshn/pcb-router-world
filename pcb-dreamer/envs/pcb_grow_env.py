@@ -408,16 +408,70 @@ class TraceGrowEnv(gym.Env):
         cx, cy = ax + t * dx, ay + t * dy
         return np.hypot(px - cx, py - cy)
 
+    def _obstacle_penetration(self, x: float, y: float) -> float:
+        """Return depth of penetration into any obstacle/connector (0 if clear)."""
+        depth = 0.0
+        # Connector
+        cxmin = self.board.connector_x
+        cxmax = self.board.connector_x + self.board.connector_w
+        cymin = self.board.connector_y
+        cymax = self.board.connector_y + self.board.connector_h
+        if self.board.connector_w > 0:
+            if cxmin <= x <= cxmax and cymin <= y <= cymax:
+                depth = max(depth, 1.0)
+            else:
+                dx = max(cxmin - x, 0.0, x - cxmax)
+                dy = max(cymin - y, 0.0, y - cymax)
+                d = np.hypot(dx, dy)
+                if d < TP_TO_CONNECTOR_MIN:
+                    depth = max(depth, TP_TO_CONNECTOR_MIN - d)
+        # Rectangular obstacles
+        for obs in self.board.rect_obstacles:
+            xmin, ymin, xmax, ymax = obs.bounds
+            buf = obs.clearance
+            if xmin - buf < x < xmax + buf and ymin - buf < y < ymax + buf:
+                pen = min(x - (xmin - buf), (xmax + buf) - x,
+                          y - (ymin - buf), (ymax + buf) - y)
+                depth = max(depth, max(0.0, pen))
+        # Circular obstacles
+        for obs in self.board.circ_obstacles:
+            d = np.hypot(x - obs.cx, y - obs.cy)
+            if d < obs.radius + obs.clearance:
+                depth = max(depth, obs.radius + obs.clearance - d)
+        return depth
+
+    def _crossing_penalty(self, x: float, y: float, active: int) -> float:
+        """Return a penalty (0-1 scale) for proximity to other trace segments."""
+        LOOKBACK = 8
+        total = 0.0
+        for ti, path in enumerate(self.paths):
+            if ti == active or len(path) < 2:
+                continue
+            seg_end = len(path) - 1
+            seg_start = max(0, seg_end - LOOKBACK)
+            for k in range(seg_start, seg_end):
+                d = self._point_seg_dist(x, y, path[k], path[k + 1])
+                if d < TRACE_PATH_CLEARANCE:
+                    total += (TRACE_PATH_CLEARANCE - d) / TRACE_PATH_CLEARANCE
+        return total
+
     def _compute_mask(self) -> np.ndarray:
-        """Mask of valid next directions for the active trace's tip."""
+        """Mask of valid next directions for the active trace's tip.
+
+        Only masks directions that would take the tip completely off the board
+        (the one true physics constraint -- a trace cannot exist outside the PCB).
+        Everything else (edge clearance, obstacles, trace crossing) is handled
+        by soft penalties in the reward so the random policy always has valid
+        moves and the world model sees diverse, unconstrained trajectories.
+        """
         tx, ty = self.tips[self.active]
         mask = np.zeros(NUM_DIRECTIONS, dtype=bool)
         for d in range(NUM_DIRECTIONS):
             nx = tx + DIRECTIONS[d, 0] * self.step_mm
             ny = ty + DIRECTIONS[d, 1] * self.step_mm
-            if not self._point_clear_of_static(nx, ny):
-                continue
-            if not self._point_clear_of_other_traces(nx, ny, self.active):
+            # Only exclude positions outside the board boundary
+            if (nx < self.board.x_min or nx > self.board.x_max or
+                    ny < self.board.y_min or ny > self.board.y_max):
                 continue
             mask[d] = True
         return mask
@@ -599,30 +653,36 @@ class TraceGrowEnv(gym.Env):
             self.grown[self.active] += 1
             moved = True
 
-        # DENSE reward: two components, both per-step.
-        #
-        # 1. Tip spacing: reward traces spreading apart. Weight kept low so
-        #    the agent is not strongly penalised for curls that temporarily
-        #    bring tips closer together.
+        # DENSE reward: soft signals, no hard gates.
+        # All constraints are expressed as graded penalties or bonuses so the
+        # world model always receives a meaningful reward signal and the random
+        # policy is never blocked from completing an episode.
+
         tip_min = self._min_pairwise(self.tips)
+        # 1. Tip spacing bonus: small per-step encouragement to spread apart.
         reward += self.dense_reward_weight * min(tip_min / TP_TO_TP_MIN, 1.0)
-        #
-        # 2. Edge proximity penalty: penalise the ACTIVE tip being within
-        #    TP_TO_EDGE_MIN (14mm) of any board edge. This gives a per-step
-        #    gradient signal teaching the policy to stay in the valid endpoint
-        #    zone during growth, without hard-masking it (which would prevent
-        #    the desired curling behaviour through the lower board region).
-        #    Weight matches dense_reward_weight so the two signals are balanced.
+
         tx, ty = self.tips[self.active]
+
+        # 2. Edge proximity soft penalty: proportional to how far inside the
+        #    TP_TO_EDGE_MIN zone the active tip is. No hard mask -- just signal.
         edge_margin = min(
-            tx - self.board.x_min,
-            self.board.x_max - tx,
-            ty - self.board.y_min,
-            self.board.y_max - ty,
+            tx - self.board.x_min, self.board.x_max - tx,
+            ty - self.board.y_min, self.board.y_max - ty,
         )
         if edge_margin < TP_TO_EDGE_MIN:
-            penalty = (edge_margin - TP_TO_EDGE_MIN) / TP_TO_EDGE_MIN
-            reward += self.dense_reward_weight * penalty
+            reward += self.dense_reward_weight * (edge_margin - TP_TO_EDGE_MIN) / TP_TO_EDGE_MIN
+
+        # 3. Obstacle / connector soft penalty: proportional to penetration depth.
+        obs_pen = self._obstacle_penetration(tx, ty)
+        if obs_pen > 0:
+            reward -= self.dense_reward_weight * min(obs_pen / 5.0, 1.0)
+
+        # 4. Trace crossing soft penalty: count how many other trace segments
+        #    the active tip is within TRACE_PATH_CLEARANCE of.
+        crossing_pen = self._crossing_penalty(tx, ty, self.active)
+        if crossing_pen > 0:
+            reward -= self.dense_reward_weight * min(crossing_pen, 1.0)
 
         self.steps_taken += 1
 
@@ -645,46 +705,49 @@ class TraceGrowEnv(gym.Env):
     def _terminal_reward(self, all_complete: bool) -> float:
         endpoints = self.tips.copy()
         ep_min = self._min_pairwise(endpoints)
+        frac_complete = float(np.mean(self.grown / max(self.num_rounds, 1)))
+        completed = all_complete and bool(np.all(self.grown >= self.num_rounds))
 
-        # Endpoint validity: every endpoint must be a legal test-point location
-        # (edge + connector + obstacle clearance), and TP-to-TP spacing met.
+        # ── Spacing signal: fully graded, no binary gate ─────────────────────
+        # Below threshold: graded penalty. Above threshold: linear reward.
+        # Every episode gets a gradient signal regardless of whether it passes.
+        spacing_ratio = ep_min / max(self.spacing_threshold, 1e-6)
+        if spacing_ratio >= 1.0:
+            reward_spacing = 10.0 * (spacing_ratio - 1.0)
+        else:
+            reward_spacing = -5.0 * (1.0 - spacing_ratio)
+
+        # ── Endpoint soft penalties ───────────────────────────────────────────
+        endpoint_penalty = 0.0
+        for x, y in endpoints:
+            edge_margin = min(x - self.board.x_min, self.board.x_max - x,
+                              y - self.board.y_min, self.board.y_max - y)
+            if edge_margin < TP_TO_EDGE_MIN:
+                endpoint_penalty += (TP_TO_EDGE_MIN - edge_margin) / TP_TO_EDGE_MIN
+            obs_pen = self._obstacle_penetration(x, y)
+            if obs_pen > 0:
+                endpoint_penalty += min(obs_pen / 5.0, 1.0)
+
+        # ── Completion bonus ──────────────────────────────────────────────────
+        completion_bonus = 10.0 * frac_complete
+
+        # ── Logging metrics ───────────────────────────────────────────────────
         valid_endpoints = all(
             self._point_clear_of_static(x, y, for_endpoint=True)
             for x, y in endpoints
         )
         spacing_ok = ep_min >= self.spacing_threshold if self.num_traces > 1 else True
-
-        # Length equality holds by construction only if every trace completed.
-        # If the step cap was hit with some trace boxed in, lengths differ and
-        # the solution is invalid.
-        completed = all_complete and bool(np.all(self.grown >= self.num_rounds))
-
-        if completed and valid_endpoints and spacing_ok:
-            # Linear reward above the current spacing threshold — always
-            # incentivised to spread further, regardless of threshold value.
-            reward_spacing = 10.0 * (ep_min / self.spacing_threshold - 1.0)
-            gate = 10.0
-        else:
-            reward_spacing = 0.0
-            # graded penalty: pull toward valid spacing + reward completion
-            # progress, but always below the worst valid solution.
-            frac_complete = float(np.mean(self.grown / max(self.num_rounds, 1)))
-            gate = -8.0 + 4.0 * frac_complete + 4.0 * min(ep_min / TP_TO_TP_MIN, 1.0)
-
-        # length spread across COMPLETED traces (should be ~0 by construction)
         comp_lengths = [
-            sum(np.hypot(p[k + 1][0] - p[k][0], p[k + 1][1] - p[k][1])
-                for k in range(len(p) - 1))
-            for ti, p in enumerate(self.paths)
-            if self.grown[ti] >= self.num_rounds
+            sum(np.hypot(p[k+1][0]-p[k][0], p[k+1][1]-p[k][1])
+                for k in range(len(p)-1))
+            for ti, p in enumerate(self.paths) if self.grown[ti] >= self.num_rounds
         ]
         length_spread = (max(comp_lengths) - min(comp_lengths)) if len(comp_lengths) > 1 else 0.0
         total_len = sum(
-            sum(np.hypot(p[k + 1][0] - p[k][0], p[k + 1][1] - p[k][1])
-                for k in range(len(p) - 1))
+            sum(np.hypot(p[k+1][0]-p[k][0], p[k+1][1]-p[k][1])
+                for k in range(len(p)-1))
             for p in self.paths
         )
-
         self._terminal_metrics = {
             "min_tp_spacing": ep_min,
             "endpoints_valid": 1.0 if valid_endpoints else 0.0,
@@ -694,9 +757,10 @@ class TraceGrowEnv(gym.Env):
             "total_length": total_len,
             "length_spread": length_spread,
             "reward_spacing": reward_spacing,
-            "reward_gate": gate,
+            "reward_gate": completion_bonus,
+            "endpoint_penalty": endpoint_penalty,
         }
-        return reward_spacing + gate
+        return reward_spacing + completion_bonus - endpoint_penalty
 
     def _get_info(self, invalid_this_step: bool = False):
         info = {

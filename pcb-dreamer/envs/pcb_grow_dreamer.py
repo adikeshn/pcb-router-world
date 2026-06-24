@@ -27,6 +27,7 @@ _LOG_KEYS = [
     "log_invalid_actions",
     "log_reward_spacing",
     "log_reward_gate",
+    "log_endpoint_penalty",
 ]
 
 _TERMINAL_INFO_KEYS = {
@@ -38,6 +39,7 @@ _TERMINAL_INFO_KEYS = {
     "log_spacing_ok": "spacing_ok",
     "log_reward_spacing": "reward_spacing",
     "log_reward_gate": "reward_gate",
+    "log_endpoint_penalty": "endpoint_penalty",
 }
 
 
