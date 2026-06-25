@@ -266,32 +266,16 @@ class TraceGrowEnv(gym.Env):
             for k in range(len(path) - 1):
                 self._draw_segment(img, path[k], path[k + 1], 1, val)
 
-        # BREAKOUT TIP markers: draw a white cross at the point where the fixed
-        # breakout ends and the agent takes over. This is more useful than
-        # marking the actual pin origins (which are sub-pixel at this scale and
-        # buried inside the connector). Uses all 3 channels so it's visible over
-        # the connector and any trace color.
+        # WHITE: pin origin crosses (sub-pixel at board scale but visible close up)
         for ti, path in enumerate(self.paths):
-            # The breakout is the fixed prefix; the agent starts at path[-1]
-            # initially (before any growth), but we mark the tip after breakout
-            # which is path[-1] at reset time. Since we only call this during
-            # or after episodes, use the first point beyond the connector exit —
-            # approximately the last point of the densified breakout, i.e. the
-            # current tip before any agent moves. We store the breakout length
-            # so we know the split: it's len(path) - grown[ti] points from start.
-            breakout_end_idx = len(path) - int(self.grown[ti])
-            breakout_end_idx = max(0, min(breakout_end_idx, len(path) - 1))
-            bx, by = path[breakout_end_idx]
-            px, py = self._w2p(bx, by)
-            r = max(2, int(1.5 * self._x_scale))
-            for dx in range(-r, r + 1):
-                for dy in range(-r, r + 1):
-                    if abs(dx) <= 1 or abs(dy) <= 1:
-                        ppx, ppy = px + dx, py + dy
-                        if 0 <= ppy < self.img_size and 0 <= ppx < self.img_size:
-                            img[ppy, ppx, 0] = 255
-                            img[ppy, ppx, 1] = 255
-                            img[ppy, ppx, 2] = 255
+            sx, sy = path[0]
+            px, py = self._w2p(sx, sy)
+            for delta in range(-2, 3):
+                for ppx, ppy in [(px+delta, py), (px, py+delta)]:
+                    if 0 <= ppy < self.img_size and 0 <= ppx < self.img_size:
+                        img[ppy, ppx, 0] = 255
+                        img[ppy, ppx, 1] = 255
+                        img[ppy, ppx, 2] = 255
 
         # BLUE: active tip + its currently-valid next directions
         if self.num_traces:
@@ -506,85 +490,21 @@ class TraceGrowEnv(gym.Env):
         self._rng = np.random.RandomState(
             seed if seed is not None else self._board_seed)
 
-        # Initialize each path with its start point + a fixed straight breakout
-        # so adjacent traces separate before the agent takes over.
+        # No pre-computed breakout. The agent routes from the exact connector
+        # pin positions. The trace-to-trace crossing mask naturally forces
+        # adjacent pins to diverge since they cannot step into each other,
+        # producing organic fanout without pre-determined geometry. This also
+        # means no trace geometry passes through the connector obstacle zone.
         self.paths = []
         self.tips = np.zeros((self.num_traces, 2))
         self.last_dir = np.zeros(self.num_traces, dtype=int)
 
-        conn_cx = self.board.connector_x + self.board.connector_w / 2
-        conn_cy = self.board.connector_y + self.board.connector_h / 2
-        conn_top = self.board.connector_y + self.board.connector_h
-        conn_bot = self.board.connector_y
-
-        # Breakout. The trace starts sit INSIDE the connector outline, and the
-        # board is asymmetric (here the connector hugs the bottom edge, so the
-        # only roomy exit is "up", i.e. toward whichever board edge is far).
-        # Every trace breaks out in two phases of EQUAL TOTAL LENGTH so length
-        # equality is preserved:
-        #   Phase 1: straight along the roomy axis until clear of the connector.
-        #   Phase 2: fan laterally, spreading traces toward target TP spacing.
-        # The two-segment polyline is then resampled to a fixed total length so
-        # all traces' breakouts are identical length regardless of fan amount.
-        space_up = self.board.y_max - conn_top
-        space_down = conn_bot - self.board.y_min
-        if space_up >= space_down:
-            dir_y, exit_y = 1.0, conn_top + (TP_TO_CONNECTOR_MIN + 1.0)
-        else:
-            dir_y, exit_y = -1.0, conn_bot - (TP_TO_CONNECTOR_MIN + 1.0)
-
-        order = sorted(range(self.num_traces),
-                       key=lambda i: self.board.traces[i].start_x)
-        n = self.num_traces
-
-        # Equal-arc fan from a virtual pivot above the connector. Every trace
-        # is routed start -> exit (clear of connector) -> a fan endpoint placed
-        # on an arc of radius R about the connector center, at equal angular
-        # spacing across a wide arc. Equal radius => equal-distance endpoints
-        # from the pivot, and the start->exit->endpoint polylines are then
-        # length-normalized so all breakouts are exactly equal length. The arc
-        # placement guarantees the endpoints are well separated regardless of
-        # how tightly the starts are packed.
-        R = BREAKOUT_MM + abs(exit_y - conn_cy)  # breakout arc radius
-        arc_span = np.deg2rad(120.0)  # narrower than 160: keeps corner traces away from walls
-        base_ang = (np.pi / 2 if dir_y > 0 else -np.pi / 2)
-        raw_paths = {}
-        for rank, ti in enumerate(order):
-            t = self.board.traces[ti]
+        for ti, t in enumerate(self.board.traces):
             sx, sy = t.start_x, t.start_y
-            frac = 0.0 if n == 1 else (rank / (n - 1) - 0.5)  # [-0.5, 0.5]
-            ang = base_ang + frac * arc_span
-            ex = conn_cx + R * np.cos(ang)
-            ey = conn_cy + R * np.sin(ang)
-            # via point: straight out of the connector first, then to the arc
-            p_exit = (sx, exit_y)
-            raw_paths[ti] = [(sx, sy), p_exit, (ex, ey)]
-
-        def _polylen(pts):
-            return sum(np.hypot(pts[k + 1][0] - pts[k][0],
-                                pts[k + 1][1] - pts[k][1])
-                       for k in range(len(pts) - 1))
-
-        max_blen = max(_polylen(p) for p in raw_paths.values())
-        indexed_paths = []
-        for ti, raw in raw_paths.items():
-            blen = _polylen(raw)
-            pad = max_blen - blen
-            if pad > 1e-6:
-                ex, ey = raw[-1]
-                # Extend upward (along the roomy axis) rather than along the
-                # outward radial. Radial extension pushes corner traces further
-                # into corners; upward extension keeps all tips in the safe zone.
-                raw = raw + [(ex, ey + dir_y * pad)]
-            path = _densify(raw, self.step_mm)
-            indexed_paths.append((ti, path))
-            self.tips[ti] = path[-1]
-            vx, vy = path[-1][0] - path[-2][0], path[-1][1] - path[-2][1]
-            nrm = np.hypot(vx, vy) + 1e-9
-            self.last_dir[ti] = int(np.argmax(DIRECTIONS @ np.array([vx / nrm, vy / nrm])))
-
-        indexed_paths.sort(key=lambda x: x[0])
-        self.paths = [p for _, p in indexed_paths]
+            self.paths.append([(sx, sy)])
+            self.tips[ti] = (sx, sy)
+            # Default initial direction: upward (N), away from connector body
+            self.last_dir[ti] = 2
 
         self.grown = np.zeros(self.num_traces, dtype=int)
         self.steps_taken = 0
