@@ -708,15 +708,6 @@ class TraceGrowEnv(gym.Env):
         frac_complete = float(np.mean(self.grown / max(self.num_rounds, 1)))
         completed = all_complete and bool(np.all(self.grown >= self.num_rounds))
 
-        # ── Spacing signal: fully graded, no binary gate ─────────────────────
-        # Below threshold: graded penalty. Above threshold: linear reward.
-        # Every episode gets a gradient signal regardless of whether it passes.
-        spacing_ratio = ep_min / max(self.spacing_threshold, 1e-6)
-        if spacing_ratio >= 1.0:
-            reward_spacing = 10.0 * (spacing_ratio - 1.0)
-        else:
-            reward_spacing = -5.0 * (1.0 - spacing_ratio)
-
         # ── Endpoint soft penalties ───────────────────────────────────────────
         endpoint_penalty = 0.0
         for x, y in endpoints:
@@ -728,15 +719,38 @@ class TraceGrowEnv(gym.Env):
             if obs_pen > 0:
                 endpoint_penalty += min(obs_pen / 5.0, 1.0)
 
-        # ── Completion bonus ──────────────────────────────────────────────────
-        completion_bonus = 10.0 * frac_complete
+        # ── Combined terminal reward ──────────────────────────────────────────
+        # No completion bonus: it was constant (+10) so it just shifted all
+        # returns up without providing any gradient signal, and the policy
+        # exploited it by clustering near walls (small penalty but still
+        # positive net return). Now the only positive reward is for good
+        # spacing with clean endpoints.
+        #
+        # Structure:
+        #   spacing below threshold:   -5 * (1 - ratio)   up to -5
+        #   endpoint violations:       - penalty           up to -8 (8 traces * max 1.0 each)
+        #   spacing above threshold:   +10 * (ratio - 1)  unbounded upward
+        #   endpoint valid + complete: +20 bonus           big positive gate
+        #
+        # Minimum possible: ~-13 (bad spacing + all endpoints near walls)
+        # Maximum early:    ~+21 (spacing=2x threshold, no violations, complete)
+        # The only path to positive return requires BOTH spreading AND valid endpoints.
+        spacing_ratio = ep_min / max(self.spacing_threshold, 1e-6)
+        if spacing_ratio >= 1.0:
+            reward_spacing = 10.0 * (spacing_ratio - 1.0)
+        else:
+            reward_spacing = -5.0 * (1.0 - spacing_ratio)
 
-        # ── Logging metrics ───────────────────────────────────────────────────
         valid_endpoints = all(
             self._point_clear_of_static(x, y, for_endpoint=True)
             for x, y in endpoints
         )
         spacing_ok = ep_min >= self.spacing_threshold if self.num_traces > 1 else True
+
+        # Big bonus ONLY for completing well -- no free completion credit
+        completion_bonus = 20.0 if (completed and valid_endpoints and spacing_ok) else 0.0
+
+        # ── Logging metrics ───────────────────────────────────────────────────
         comp_lengths = [
             sum(np.hypot(p[k+1][0]-p[k][0], p[k+1][1]-p[k][1])
                 for k in range(len(p)-1))
