@@ -458,20 +458,26 @@ class TraceGrowEnv(gym.Env):
     def _compute_mask(self) -> np.ndarray:
         """Mask of valid next directions for the active trace's tip.
 
-        Only masks directions that would take the tip completely off the board
-        (the one true physics constraint -- a trace cannot exist outside the PCB).
-        Everything else (edge clearance, obstacles, trace crossing) is handled
-        by soft penalties in the reward so the random policy always has valid
-        moves and the world model sees diverse, unconstrained trajectories.
+        Hard masks:
+          - Off-board (true physics: trace cannot exist outside PCB)
+          - Trace-to-trace crossing (true physics: two copper traces on the
+            same layer cannot overlap)
+
+        Everything else (edge clearance, obstacles, connector proximity) is
+        handled by soft penalties in the reward so the agent can route through
+        those regions freely and the world model sees diverse trajectories.
         """
         tx, ty = self.tips[self.active]
         mask = np.zeros(NUM_DIRECTIONS, dtype=bool)
         for d in range(NUM_DIRECTIONS):
             nx = tx + DIRECTIONS[d, 0] * self.step_mm
             ny = ty + DIRECTIONS[d, 1] * self.step_mm
-            # Only exclude positions outside the board boundary
+            # Hard: off-board
             if (nx < self.board.x_min or nx > self.board.x_max or
                     ny < self.board.y_min or ny > self.board.y_max):
+                continue
+            # Hard: trace-to-trace crossing (physically impossible on one layer)
+            if not self._point_clear_of_other_traces(nx, ny, self.active):
                 continue
             mask[d] = True
         return mask
@@ -659,13 +665,12 @@ class TraceGrowEnv(gym.Env):
         # policy is never blocked from completing an episode.
 
         tip_min = self._min_pairwise(self.tips)
-        # 1. Tip spacing bonus: small per-step encouragement to spread apart.
+        # 1. Tip spacing bonus
         reward += self.dense_reward_weight * min(tip_min / TP_TO_TP_MIN, 1.0)
 
         tx, ty = self.tips[self.active]
 
-        # 2. Edge proximity soft penalty: proportional to how far inside the
-        #    TP_TO_EDGE_MIN zone the active tip is. No hard mask -- just signal.
+        # 2. Edge proximity soft penalty
         edge_margin = min(
             tx - self.board.x_min, self.board.x_max - tx,
             ty - self.board.y_min, self.board.y_max - ty,
@@ -673,16 +678,10 @@ class TraceGrowEnv(gym.Env):
         if edge_margin < TP_TO_EDGE_MIN:
             reward += self.dense_reward_weight * (edge_margin - TP_TO_EDGE_MIN) / TP_TO_EDGE_MIN
 
-        # 3. Obstacle / connector soft penalty: proportional to penetration depth.
+        # 3. Obstacle / connector soft penalty
         obs_pen = self._obstacle_penetration(tx, ty)
         if obs_pen > 0:
             reward -= self.dense_reward_weight * min(obs_pen / 5.0, 1.0)
-
-        # 4. Trace crossing soft penalty: count how many other trace segments
-        #    the active tip is within TRACE_PATH_CLEARANCE of.
-        crossing_pen = self._crossing_penalty(tx, ty, self.active)
-        if crossing_pen > 0:
-            reward -= self.dense_reward_weight * min(crossing_pen, 1.0)
 
         self.steps_taken += 1
 
