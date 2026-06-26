@@ -480,6 +480,23 @@ def main():
                     "portfolio/best_spacing": best["min_tp_spacing"] if best else float("nan"),
                     "portfolio/best_total_length": best["total_length"] if best else float("nan"),
                 }, step=agent._step)
+                # Upload solution PNGs immediately when portfolio updates
+                try:
+                    import wandb as _wandb
+                    sol_imgs = {}
+                    for rank, sol in enumerate(tracker.solutions[:3]):
+                        png = tracker.outdir / f"solution_{rank}.png"
+                        if png.exists():
+                            sol_imgs[f"portfolio/solution_{rank}"] = _wandb.Image(
+                                str(png),
+                                caption=(f"rank={rank} min={sol['min_tp_spacing']:.1f}mm "
+                                         f"mean={sol.get('mean_tp_spacing',0):.1f}mm "
+                                         f"step={sol['step']}")
+                            )
+                    if sol_imgs:
+                        wandb_run.log(sol_imgs, step=agent._step)
+                except Exception as e:
+                    print(f"[wandb portfolio imgs] {e}")
 
     while agent._step < config.steps + config.eval_every:
         logger.write()
@@ -498,6 +515,66 @@ def main():
                     logger.video("eval_openl", to_np(video_pred))
                 except StopIteration:
                     pass
+
+            # Render current board state to wandb at every eval checkpoint.
+            # Uses the last eval episode's env state (already run above).
+            if wandb_run is not None and args.grow:
+                try:
+                    import wandb as _wandb
+                    import matplotlib
+                    matplotlib.use("Agg")
+                    import matplotlib.pyplot as plt
+                    import io
+
+                    inner = get_inner_env(eval_envs[0])
+                    b = inner.board
+                    fig, ax = plt.subplots(figsize=(10, 7))
+                    # Board outline
+                    ax.plot([b.x_min,b.x_max,b.x_max,b.x_min,b.x_min],
+                            [b.y_min,b.y_min,b.y_max,b.y_max,b.y_min], "k-", lw=2)
+                    # Connector / obstacles
+                    for obs_r in b.rect_obstacles:
+                        xn,yn,xx,yx = obs_r.bounds
+                        ax.add_patch(plt.Rectangle((xn,yn),xx-xn,yx-yn,
+                                                   fill=True,color="salmon",alpha=0.5,zorder=2))
+                    # Traces from last episode
+                    cmap = plt.get_cmap("tab10")
+                    for ti, p in enumerate(inner.paths):
+                        if len(p) < 2: continue
+                        arr = np.array(p)
+                        ax.plot(arr[:,0],arr[:,1],"-",color=cmap(ti%10),lw=1.5,zorder=4)
+                        ax.plot(arr[-1,0],arr[-1,1],"o",color=cmap(ti%10),
+                                markersize=8,markeredgecolor="k",zorder=6)
+                        ax.plot(arr[0,0],arr[0,1],"s",color=cmap(ti%10),
+                                markersize=4,zorder=5)
+                    m = inner._terminal_metrics
+                    min_sp  = m.get("min_tp_spacing", 0)
+                    mean_sp = m.get("mean_tp_spacing", 0)
+                    pen     = m.get("endpoint_penalty", 0)
+                    complete = m.get("all_complete", 0)
+                    ax.set_xlim(b.x_min-5, b.x_max+5)
+                    ax.set_ylim(b.y_min-5, b.y_max+5)
+                    ax.set_aspect("equal")
+                    ax.set_title(
+                        f"Step {agent._step}  |  "
+                        f"min={min_sp:.1f}mm  mean={mean_sp:.1f}mm  "
+                        f"pen={pen:.2f}  complete={complete:.0f}",
+                        fontsize=10)
+                    ax.set_xlabel("X (mm)"); ax.set_ylabel("Y (mm)")
+                    fig.tight_layout()
+                    buf = io.BytesIO()
+                    fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+                    buf.seek(0)
+                    plt.close(fig)
+                    wandb_run.log({
+                        "board/last_eval_episode": _wandb.Image(
+                            buf,
+                            caption=(f"min={min_sp:.1f}mm mean={mean_sp:.1f}mm "
+                                     f"pen={pen:.2f}")
+                        )
+                    }, step=agent._step)
+                except Exception as e:
+                    print(f"[wandb board render] {e}")
 
         print(f"[Step {agent._step}] Training...")
         state = tools.simulate(

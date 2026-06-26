@@ -96,6 +96,7 @@ class DiverseGrowTracker:
             "step": int(step),
             "source": source,
             "min_tp_spacing": float(m["min_tp_spacing"]),
+            "mean_tp_spacing": float(m.get("mean_tp_spacing", 0.0)),
             "total_length": float(m["total_length"]),
             "length_spread": float(m["length_spread"]),
             "reward_terminal": float(m["reward_spacing"] + m["reward_gate"]),
