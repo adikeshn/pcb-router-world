@@ -392,6 +392,22 @@ class TraceGrowEnv(gym.Env):
         cx, cy = ax + t * dx, ay + t * dy
         return np.hypot(px - cx, py - cy)
 
+    def _physical_obstacle_hit(self, x: float, y: float) -> bool:
+        """True if (x,y) is inside a physical copper obstacle on the board.
+        These are hard constraints -- a trace cannot physically pass through
+        copper. The connector OUTLINE is excluded (it's a clearance zone, not
+        copper), but rect_obstacles (NRZ) and circ_obstacles (UPTH holes) are
+        physical copper that traces cannot cross.
+        """
+        for obs in self.board.rect_obstacles:
+            xmin, ymin, xmax, ymax = obs.bounds
+            if xmin <= x <= xmax and ymin <= y <= ymax:
+                return True
+        for obs in self.board.circ_obstacles:
+            if np.hypot(x - obs.cx, y - obs.cy) <= obs.radius:
+                return True
+        return False
+
     def _obstacle_penetration(self, x: float, y: float) -> float:
         """Return depth of penetration into any obstacle/connector (0 if clear)."""
         depth = 0.0
@@ -442,14 +458,13 @@ class TraceGrowEnv(gym.Env):
     def _compute_mask(self) -> np.ndarray:
         """Mask of valid next directions for the active trace's tip.
 
-        Hard masks:
-          - Off-board (true physics: trace cannot exist outside PCB)
-          - Trace-to-trace crossing (true physics: two copper traces on the
-            same layer cannot overlap)
+        Hard masks (physical impossibilities):
+          - Off-board
+          - Through the connector body or PCB obstacles
+          - Trace-to-trace crossing
 
-        Everything else (edge clearance, obstacles, connector proximity) is
-        handled by soft penalties in the reward so the agent can route through
-        those regions freely and the world model sees diverse trajectories.
+        Edge clearance remains soft (reward only) so traces can curl near
+        edges and through the lower board region.
         """
         tx, ty = self.tips[self.active]
         mask = np.zeros(NUM_DIRECTIONS, dtype=bool)
@@ -460,7 +475,13 @@ class TraceGrowEnv(gym.Env):
             if (nx < self.board.x_min or nx > self.board.x_max or
                     ny < self.board.y_min or ny > self.board.y_max):
                 continue
-            # Hard: trace-to-trace crossing (physically impossible on one layer)
+            # Hard: through actual PCB obstacles (NRZ rectangle, UPTH holes,
+            # tab pads). The connector OUTLINE is a clearance zone for endpoints
+            # only -- traces can route near it. Only physical copper obstacles
+            # are hard-masked during growth.
+            if self._physical_obstacle_hit(nx, ny):
+                continue
+            # Hard: trace-to-trace crossing
             if not self._point_clear_of_other_traces(nx, ny, self.active):
                 continue
             mask[d] = True
@@ -712,8 +733,14 @@ class TraceGrowEnv(gym.Env):
         )
         spacing_ok = ep_min >= self.spacing_threshold if self.num_traces > 1 else True
 
-        # Big bonus ONLY for completing well -- no free completion credit
-        completion_bonus = 20.0 if (completed and valid_endpoints and spacing_ok) else 0.0
+        # Smooth continuous bonus: replaces binary gate=20.
+        # Scales with spacing ratio AND cleanliness of endpoints.
+        # Always differentiable -- no cliff at the threshold.
+        # High spacing + clean endpoints = large bonus.
+        # Partial spacing or minor violations = smaller but nonzero bonus.
+        spacing_ratio = ep_min / max(self.spacing_threshold, 1e-6)
+        clean_fraction = max(0.0, 1.0 - endpoint_penalty / max(self.num_traces, 1))
+        completion_bonus = 20.0 * spacing_ratio * clean_fraction if completed else 0.0
 
         # ── Logging metrics ───────────────────────────────────────────────────
         comp_lengths = [
