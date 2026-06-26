@@ -356,24 +356,37 @@ class TraceGrowEnv(gym.Env):
     def _point_clear_of_other_traces(self, x: float, y: float,
                                      active: int) -> bool:
         """Path-level clearance: (x,y) must stay TRACE_PATH_CLEARANCE away
-        from recent segments of every other trace and early segments of own
-        path. Only checks the last LOOKBACK segments for efficiency."""
-        LOOKBACK = 8  # check this many recent segments per trace
+        from ALL segments of every other trace.
+
+        Previously used LOOKBACK=8 (only checking last 16mm per trace) for
+        efficiency, but this allowed traces to cross older segments -- the
+        root cause of intersections visible in solution images.
+
+        Checks all segments of other traces. For the active trace's own path,
+        skips only the last 2 points (tip) to avoid trivial self-collision.
+        """
         for ti, path in enumerate(self.paths):
             if len(path) < 2:
+                # Single-point path: just check proximity to that point
                 if ti != active and path:
                     if np.hypot(x - path[0][0], y - path[0][1]) < TRACE_PATH_CLEARANCE:
                         return False
                 continue
+
             if ti == active:
-                # For own trace: skip the very tip (last 2 points) to avoid
-                # trivial self-collision, check a few earlier segments
+                # Own trace: skip the tip (last 2 points) to avoid
+                # trivial self-collision, but check all earlier segments.
+                # Also skip seg0-1 (pin exit geometry).
                 seg_end = max(0, len(path) - 3)
-                seg_start = max(0, seg_end - LOOKBACK)
+                seg_start = 2  # skip pin start + first exit step
             else:
-                # For other traces: check the most recent LOOKBACK segments
+                # Other traces: check all segments except the first 2.
+                # Adjacent pins are 0.9mm apart, clearance is 1.33mm --
+                # their exit segments are inherently within clearance and
+                # represent fixed pad geometry, not routing violations.
                 seg_end = len(path) - 1
-                seg_start = max(0, seg_end - LOOKBACK)
+                seg_start = 2  # skip pin start + first exit step
+
             for k in range(seg_start, seg_end):
                 if self._point_seg_dist(x, y, path[k], path[k + 1]) < TRACE_PATH_CLEARANCE:
                     return False
