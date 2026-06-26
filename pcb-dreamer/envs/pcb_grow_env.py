@@ -512,6 +512,7 @@ class TraceGrowEnv(gym.Env):
         self.order = list(range(self.num_traces))
         self._rng.shuffle(self.order)
         self.order_pos = 0
+        self.rounds_completed = 0  # full round-robin cycles completed
         self.active = self._next_active(reset=True)
         self.current_mask = self._compute_mask()
 
@@ -605,6 +606,16 @@ class TraceGrowEnv(gym.Env):
 
         self.steps_taken += 1
 
+        # Per-round intermediate reward: fires whenever the round-robin wraps.
+        # A round wraps when order_pos is about to roll over to 0 on the next
+        # call to _next_active. We detect this by checking if the CURRENT
+        # order_pos is at the last position in the current order.
+        # This gives the model a graded signal every ~8 steps instead of
+        # only at episode termination (every 320 steps).
+        if moved and (self.order_pos + 1 >= len(self.order)):
+            self.rounds_completed += 1
+            reward += self._per_round_reward()
+
         # Termination: every trace has grown its full length, OR the hard step
         # cap is reached (covers the pathological case of a permanently boxed-in
         # trace). Length equality holds for all traces that reached num_rounds.
@@ -620,6 +631,41 @@ class TraceGrowEnv(gym.Env):
 
         return (self._render_obs(), np.float32(reward), terminated, False,
                 self._get_info(invalid_this_step))
+
+    def _per_round_reward(self) -> float:
+        """Intermediate reward at end of each complete round-robin cycle (~8 steps).
+
+        Evaluates current tip positions as proxy endpoints, scaled by progress
+        through the episode (progress^2 so early rounds don't dominate).
+        This puts meaningful constraint signals within the 15-step imagination
+        horizon rather than 305 steps away at termination.
+        """
+        if self.num_rounds == 0:
+            return 0.0
+        progress = min(self.rounds_completed / self.num_rounds, 1.0)
+
+        # Spacing signal: same shape as terminal but scaled down
+        ep_min = self._min_pairwise(self.tips)
+        ratio = ep_min / max(self.spacing_threshold, 1e-6)
+        if ratio >= 1.0:
+            spacing_signal = 1.0 * (ratio - 1.0)
+        else:
+            spacing_signal = -0.5 * (1.0 - ratio)
+
+        # Endpoint proximity penalty (lighter weight than terminal)
+        ep_pen = 0.0
+        for x, y in self.tips:
+            edge = min(x - self.board.x_min, self.board.x_max - x,
+                       y - self.board.y_min, self.board.y_max - y)
+            if edge < TP_TO_EDGE_MIN:
+                ep_pen += 0.1 * (TP_TO_EDGE_MIN - edge) / TP_TO_EDGE_MIN
+            obs = self._obstacle_penetration(x, y)
+            if obs > 0:
+                ep_pen += 0.1 * min(obs / 5.0, 1.0)
+
+        # Scale by progress^2: near-zero early (tips still near connector),
+        # meaningful in the final third of the episode
+        return (progress ** 2) * (spacing_signal - ep_pen)
 
     def _terminal_reward(self, all_complete: bool) -> float:
         endpoints = self.tips.copy()
