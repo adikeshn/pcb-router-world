@@ -91,6 +91,23 @@ class DiverseGrowTracker:
         if not m or m.get("routable", 0.0) != 1.0:
             return None  # only complete, valid solutions qualify
 
+        # Reject solutions with path crossings -- the mask prevents most but
+        # sequential routing can produce rare violations where trace A lays a
+        # segment that trace B later crosses. Don't put these in the portfolio.
+        from envs.pcb_grow_env import TRACE_PATH_CLEARANCE
+        paths = inner_env.get_paths()
+        for ti, pi in enumerate(paths):
+            for tj, pj in enumerate(paths):
+                if tj <= ti:
+                    continue
+                for k in range(len(pi) - 1):
+                    for m2 in range(len(pj) - 1):
+                        d = inner_env._point_seg_dist(
+                            pi[k][0], pi[k][1], pj[m2], pj[m2 + 1]
+                        )
+                        if d < TRACE_PATH_CLEARANCE:
+                            return None  # has a path crossing, reject
+
         endpoints = inner_env.get_endpoints().tolist()
         candidate = {
             "step": int(step),
