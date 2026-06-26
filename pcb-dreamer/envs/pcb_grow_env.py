@@ -701,15 +701,20 @@ class TraceGrowEnv(gym.Env):
         completed = all_complete and bool(np.all(self.grown >= self.num_rounds))
 
         # ── Endpoint soft penalties ───────────────────────────────────────────
+        # Weight is 3.0 per violation (proportional to depth).
+        # With mean spacing rewards of 15-20 and bonuses of 20-40, the old
+        # weight of 1.0 was a minor nuisance. 3x makes edge violations
+        # cost enough to change behavior without blocking the spacing signal.
+        EP_PEN_WEIGHT = 3.0
         endpoint_penalty = 0.0
         for x, y in endpoints:
             edge_margin = min(x - self.board.x_min, self.board.x_max - x,
                               y - self.board.y_min, self.board.y_max - y)
             if edge_margin < TP_TO_EDGE_MIN:
-                endpoint_penalty += (TP_TO_EDGE_MIN - edge_margin) / TP_TO_EDGE_MIN
+                endpoint_penalty += EP_PEN_WEIGHT * (TP_TO_EDGE_MIN - edge_margin) / TP_TO_EDGE_MIN
             obs_pen = self._obstacle_penetration(x, y)
             if obs_pen > 0:
-                endpoint_penalty += min(obs_pen / 5.0, 1.0)
+                endpoint_penalty += EP_PEN_WEIGHT * min(obs_pen / 5.0, 1.0)
 
         # ── Combined terminal reward ──────────────────────────────────────────
         # No completion bonus: it was constant (+10) so it just shifted all
