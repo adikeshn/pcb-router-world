@@ -713,16 +713,21 @@ class TraceGrowEnv(gym.Env):
         # Spacing signal: mean pairwise distance, scaled down for intermediate reward.
         spacing_signal = self._mean_pairwise(self.tips) * 0.05
 
-        # Endpoint proximity penalty (lighter weight than terminal)
+        # Edge proximity penalty: penalize the active tip approaching board
+        # edges or obstacles DURING growth, not just at termination. Weight is
+        # 0.5 per violation (between the terminal 3.0 and the old 0.1) so the
+        # signal is meaningful but doesn't overwhelm the spacing reward.
+        # This gives the policy a continuous signal to stay in the interior
+        # as it grows, rather than discovering the edge penalty only at the end.
         ep_pen = 0.0
         for x, y in self.tips:
             edge = min(x - self.board.x_min, self.board.x_max - x,
                        y - self.board.y_min, self.board.y_max - y)
             if edge < TP_TO_EDGE_MIN:
-                ep_pen += 0.1 * (TP_TO_EDGE_MIN - edge) / TP_TO_EDGE_MIN
+                ep_pen += 0.5 * (TP_TO_EDGE_MIN - edge) / TP_TO_EDGE_MIN
             obs = self._obstacle_penetration(x, y)
             if obs > 0:
-                ep_pen += 0.1 * min(obs / 5.0, 1.0)
+                ep_pen += 0.5 * min(obs / 5.0, 1.0)
 
         # Scale by progress^2: near-zero early (tips still near connector),
         # meaningful in the final third of the episode
