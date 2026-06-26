@@ -666,7 +666,28 @@ class TraceGrowEnv(gym.Env):
         # trace). Length equality holds for all traces that reached num_rounds.
         all_complete = bool(np.all(self.grown >= self.num_rounds))
         cap_reached = self.steps_taken >= self.episode_steps
-        terminated = all_complete or cap_reached
+
+        # Early termination: if every incomplete trace is boxed in (no valid
+        # moves), the episode cannot progress. Detect this by checking whether
+        # ALL incomplete traces have zero valid directions. Without this, a
+        # boxed episode burns the full 3x step cap doing nothing -- wasting
+        # ~640 steps of compute and polluting the replay buffer with no-ops.
+        boxed_out = False
+        if not all_complete and not cap_reached:
+            incomplete = [t for t in range(self.num_traces)
+                          if self.grown[t] < self.num_rounds]
+            if incomplete:
+                saved_active = self.active
+                all_boxed = True
+                for t in incomplete:
+                    self.active = t
+                    if self._compute_mask().any():
+                        all_boxed = False
+                        break
+                self.active = saved_active
+                boxed_out = all_boxed
+
+        terminated = all_complete or cap_reached or boxed_out
 
         if terminated:
             reward += self._terminal_reward(all_complete)
