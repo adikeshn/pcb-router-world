@@ -393,18 +393,16 @@ class TraceGrowEnv(gym.Env):
         return np.hypot(px - cx, py - cy)
 
     def _physical_obstacle_hit(self, x: float, y: float) -> bool:
-        """True if (x,y) is inside a physical copper obstacle on the board.
-        These are hard constraints -- a trace cannot physically pass through
-        copper. The connector OUTLINE is excluded (it's a clearance zone, not
-        copper), but rect_obstacles (NRZ) and circ_obstacles (UPTH holes) are
-        physical copper that traces cannot cross.
+        """True if (x,y) is strictly inside a physical copper obstacle.
+        Uses strict inequality so points exactly on the boundary (like pin
+        start positions) are NOT considered inside -- they can move freely.
         """
         for obs in self.board.rect_obstacles:
             xmin, ymin, xmax, ymax = obs.bounds
-            if xmin <= x <= xmax and ymin <= y <= ymax:
+            if xmin < x < xmax and ymin < y < ymax:
                 return True
         for obs in self.board.circ_obstacles:
-            if np.hypot(x - obs.cx, y - obs.cy) <= obs.radius:
+            if np.hypot(x - obs.cx, y - obs.cy) < obs.radius:
                 return True
         return False
 
