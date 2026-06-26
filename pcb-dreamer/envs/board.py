@@ -359,25 +359,20 @@ def load_actual_te_board(
     trace_indices: List[int] = None,
 ) -> BoardSpec:
     """
-    Load the EXACT TE AutoLayout Example01 board from the slide spec.
+    Simplified TE board for the grow env.
 
-    All coordinates taken directly from the PowerPoint slides:
-      - Board: bottom-left (0, 98.2), width=135, height=90
-      - Non-routing zone: BL (58.294, 108.044), w=17.8, h=6.64
-      - UPTH 1: center (58.194, 105.894), dia=1.9
-      - UPTH 2: center (76.194, 105.894), dia=1.9
-      - Tab Pad 1: BL (56.151, 113.346), w=1.526, h=1.216
-      - Tab Pad 2: BL (76.711, 113.346), w=1.526, h=1.216
-      - Traces 1-10 (bottom row): y=107.9436, x = 58.9442 + (n-1)*0.9
-      - Traces 11-20 (top row):   y=114.7844, x = 58.9442 + (n-1)*0.9
-        (top y inferred by mirroring through NRZ center; matches diagram)
+    Replaces the original multi-footprint connector (NRZ + UPTHs + tab pads)
+    with a single unified connector rectangle. This is both physically cleaner
+    (one solid obstacle the agent cannot enter) and visually clearer.
 
-    Args:
-        trace_indices: 1-based list of traces to include, e.g. [1,2,3,4,11,12,13,14].
-                       Default: [1,2,3,4,11,12,13,14].
+    The assembly is shifted +20mm upward from the original CSV y-coordinates
+    so bottom-row traces have ~30mm of free space below the connector for
+    curling/routing. Trace starts are placed exactly on the obstacle edges.
 
-    Returns:
-        BoardSpec with exact geometry, no randomisation, no re-spacing.
+    Board: (0, 98.2), 135x90mm (unchanged from spec)
+    Connector: x=[55, 79], y=[128, 137]
+    Bottom pins (traces 1-10): y=128 (bottom edge), x per original pitch
+    Top pins (traces 11-20):   y=137 (top edge),    x per original pitch
     """
     if trace_indices is None:
         trace_indices = [1, 2, 3, 4, 11, 12, 13, 14]
@@ -389,84 +384,42 @@ def load_actual_te_board(
         height=90.0,
     )
 
-    # Non-routing zone (treated as a rectangular obstacle)
-    nrz_bl_x, nrz_bl_y = 58.294, 108.044
-    nrz_w, nrz_h = 17.8, 6.64
-    nrz_cx = nrz_bl_x + nrz_w / 2
-    nrz_cy = nrz_bl_y + nrz_h / 2
+    # Single unified connector rectangle
+    CONN_X0, CONN_X1 = 55.0, 79.0
+    CONN_Y0, CONN_Y1 = 128.0, 137.0
+    conn_cx = (CONN_X0 + CONN_X1) / 2
+    conn_cy = (CONN_Y0 + CONN_Y1) / 2
+
     board.rect_obstacles.append(Obstacle(
-        cx=nrz_cx, cy=nrz_cy,
-        width=nrz_w, height=nrz_h,
-        clearance=0.0,   # zero extra clearance; hard boundary
-        name="NRZ",
+        cx=conn_cx, cy=conn_cy,
+        width=CONN_X1 - CONN_X0,
+        height=CONN_Y1 - CONN_Y0,
+        clearance=0.0,
+        name="Connector",
     ))
 
-    # Tab Pad 1
-    tp1_cx = 56.151 + 1.526 / 2
-    tp1_cy = 113.346 + 1.216 / 2
-    board.rect_obstacles.append(Obstacle(
-        cx=tp1_cx, cy=tp1_cy,
-        width=1.526, height=1.216,
-        clearance=TRACE_TO_TABPAD_MIN,
-        name="TabPad1",
-    ))
+    board.connector_x = CONN_X0
+    board.connector_y = CONN_Y0
+    board.connector_w = CONN_X1 - CONN_X0
+    board.connector_h = CONN_Y1 - CONN_Y0
 
-    # Tab Pad 2
-    tp2_cx = 76.711 + 1.526 / 2
-    tp2_cy = 113.346 + 1.216 / 2
-    board.rect_obstacles.append(Obstacle(
-        cx=tp2_cx, cy=tp2_cy,
-        width=1.526, height=1.216,
-        clearance=TRACE_TO_TABPAD_MIN,
-        name="TabPad2",
-    ))
-
-    # UPTH 1 (circular, use radius + drill-to-trace clearance)
-    board.circ_obstacles.append(CircularObstacle(
-        cx=58.194, cy=105.894,
-        radius=1.9 / 2,
-        clearance=TRACE_TO_UPTH_MIN,
-        name="UPTH1",
-    ))
-
-    # UPTH 2
-    board.circ_obstacles.append(CircularObstacle(
-        cx=76.194, cy=105.894,
-        radius=1.9 / 2,
-        clearance=TRACE_TO_UPTH_MIN,
-        name="UPTH2",
-    ))
-
-    # Connector outline: encloses NRZ + tab pads + UPTHs with a small margin.
-    # Used for TP_TO_CONNECTOR_MIN clearance on test-point endpoints.
-    board.connector_x = 55.0
-    board.connector_y = 104.5
-    board.connector_w = 24.0
-    board.connector_h = 12.0
-
-    # All 20 trace starting points (1-based index), exact from CSV.
-    # Bottom row (1-10): y=107.9436. Top row (11-20): y=114.7446.
-    # Note the non-uniform pitch: traces 1-8 and 11-18 are at 0.9mm spacing,
-    # but there is a physical gap in the connector between pins 8 and 9
-    # (and 18 and 19), so traces 9,10,19,20 have a shifted x origin.
-    bottom_y = 107.9436
-    top_y    = 114.7446   # exact from CSV (not inferred)
-
+    # x positions follow original 0.9mm pitch with gap between pins 8-9
     x_positions = {
-        1:  58.9442,  2:  59.8442,  3:  60.7442,  4:  61.6442,
-        5:  62.5442,  6:  63.4442,  7:  64.3442,  8:  65.2442,
-        9:  69.1442,  10: 70.0442,
-        11: 58.9442,  12: 59.8442,  13: 60.7442,  14: 61.6442,
-        15: 62.5442,  16: 63.4442,  17: 64.3442,  18: 65.2442,
-        19: 69.1442,  20: 70.0442,
+        1: 58.9442,  2: 59.8442,  3: 60.7442,  4: 61.6442,
+        5: 62.5442,  6: 63.4442,  7: 64.3442,  8: 65.2442,
+        9: 69.1442, 10: 70.0442,
+        11: 58.9442, 12: 59.8442, 13: 60.7442, 14: 61.6442,
+        15: 62.5442, 16: 63.4442, 17: 64.3442, 18: 65.2442,
+        19: 69.1442, 20: 70.0442,
     }
 
     all_traces = {}
     for n in range(1, 21):
-        y = bottom_y if n <= 10 else top_y
-        all_traces[n] = TraceSpec(start_x=x_positions[n], start_y=y,
-                                  breakout_length=0.8626,
-                                  index=n)
+        y = CONN_Y0 if n <= 10 else CONN_Y1   # bottom or top edge
+        all_traces[n] = TraceSpec(
+            start_x=x_positions[n], start_y=y,
+            breakout_length=0.0, index=n
+        )
 
     board.traces = [all_traces[i] for i in trace_indices if i in all_traces]
     return board
