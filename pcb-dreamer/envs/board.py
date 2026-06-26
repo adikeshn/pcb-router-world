@@ -403,14 +403,23 @@ def load_actual_te_board(
     board.connector_w = CONN_X1 - CONN_X0
     board.connector_h = CONN_Y1 - CONN_Y0
 
-    # x positions follow original 0.9mm pitch with gap between pins 8-9
+    # 3mm pitch -- well above TRACE_PATH_CLEARANCE (1.33mm) so no
+    # workaround needed in the crossing mask.
+    # Centered in the connector (x=[55,79], center=67):
+    #   4 pins per row, 3mm pitch -> span = 9mm, center at 64.5mm
+    PITCH = 3.0
+    PIN_X_START = 58.5  # leftmost pin, giving span 58.5-67.5mm (centered ~63)
     x_positions = {
-        1: 58.9442,  2: 59.8442,  3: 60.7442,  4: 61.6442,
-        5: 62.5442,  6: 63.4442,  7: 64.3442,  8: 65.2442,
-        9: 69.1442, 10: 70.0442,
-        11: 58.9442, 12: 59.8442, 13: 60.7442, 14: 61.6442,
-        15: 62.5442, 16: 63.4442, 17: 64.3442, 18: 65.2442,
-        19: 69.1442, 20: 70.0442,
+        1:  PIN_X_START + 0*PITCH,   2:  PIN_X_START + 1*PITCH,
+        3:  PIN_X_START + 2*PITCH,   4:  PIN_X_START + 3*PITCH,
+        5:  PIN_X_START + 4*PITCH,   6:  PIN_X_START + 5*PITCH,
+        7:  PIN_X_START + 6*PITCH,   8:  PIN_X_START + 7*PITCH,
+        9:  PIN_X_START + 8*PITCH,   10: PIN_X_START + 9*PITCH,
+        11: PIN_X_START + 0*PITCH,   12: PIN_X_START + 1*PITCH,
+        13: PIN_X_START + 2*PITCH,   14: PIN_X_START + 3*PITCH,
+        15: PIN_X_START + 4*PITCH,   16: PIN_X_START + 5*PITCH,
+        17: PIN_X_START + 6*PITCH,   18: PIN_X_START + 7*PITCH,
+        19: PIN_X_START + 8*PITCH,   20: PIN_X_START + 9*PITCH,
     }
 
     all_traces = {}
