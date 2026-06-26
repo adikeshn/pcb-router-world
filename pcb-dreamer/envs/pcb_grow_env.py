@@ -374,18 +374,22 @@ class TraceGrowEnv(gym.Env):
                 continue
 
             if ti == active:
-                # Own trace: skip the tip (last 2 points) to avoid
-                # trivial self-collision, but check all earlier segments.
-                # Also skip seg0-1 (pin exit geometry).
-                seg_end = max(0, len(path) - 3)
-                seg_start = 2  # skip pin start + first exit step
+                # Own trace: check all segments except the last 2 (the tip
+                # and the segment it's currently extending -- trivially adjacent).
+                # Skip first 2 segments (pin exit geometry).
+                # This prevents the zigzag pattern where a trace reverses and
+                # approaches a point it visited 2+ steps ago. Previously the
+                # skip window (last 3 segs) was just large enough to allow a
+                # 180-degree reversal (tip lands on path[-3] at 0mm distance).
+                seg_end = max(0, len(path) - 2)  # skip only the last 2 points
+                seg_start = 2
             else:
                 # Other traces: check all segments except the first 2.
                 # Adjacent pins are 0.9mm apart, clearance is 1.33mm --
                 # their exit segments are inherently within clearance and
                 # represent fixed pad geometry, not routing violations.
                 seg_end = len(path) - 1
-                seg_start = 2  # skip pin start + first exit step
+                seg_start = 2
 
             for k in range(seg_start, seg_end):
                 if self._point_seg_dist(x, y, path[k], path[k + 1]) < TRACE_PATH_CLEARANCE:
