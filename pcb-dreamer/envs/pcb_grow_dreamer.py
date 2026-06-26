@@ -20,6 +20,7 @@ from envs.pcb_grow_env import TraceGrowEnv, NUM_DIRECTIONS
 _LOG_KEYS = [
     "log_routable",
     "log_min_tp_spacing",
+    "log_mean_tp_spacing",
     "log_total_length",
     "log_length_spread",
     "log_endpoints_valid",
@@ -33,6 +34,7 @@ _LOG_KEYS = [
 _TERMINAL_INFO_KEYS = {
     "log_routable": "routable",
     "log_min_tp_spacing": "min_tp_spacing",
+    "log_mean_tp_spacing": "mean_tp_spacing",
     "log_total_length": "total_length",
     "log_length_spread": "length_spread",
     "log_endpoints_valid": "endpoints_valid",

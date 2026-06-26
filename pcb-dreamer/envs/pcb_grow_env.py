@@ -500,6 +500,18 @@ class TraceGrowEnv(gym.Env):
                     m = d
         return m
 
+    def _mean_pairwise(self, pts: np.ndarray) -> float:
+        """Mean distance over all pairs. Better training signal than min:
+        gives gradient on all pairs simultaneously, not just the closest."""
+        if len(pts) < 2:
+            return 0.0
+        total, count = 0.0, 0
+        for i in range(len(pts)):
+            for j in range(i + 1, len(pts)):
+                total += np.hypot(pts[i, 0] - pts[j, 0], pts[i, 1] - pts[j, 1])
+                count += 1
+        return total / count if count > 0 else 0.0
+
     # ------------------------------------------------------------------
     # gym API
     # ------------------------------------------------------------------
@@ -604,9 +616,10 @@ class TraceGrowEnv(gym.Env):
         # world model always receives a meaningful reward signal and the random
         # policy is never blocked from completing an episode.
 
-        tip_min = self._min_pairwise(self.tips)
-        # 1. Tip spacing bonus
-        reward += self.dense_reward_weight * min(tip_min / TP_TO_TP_MIN, 1.0)
+        # 1. Tip spacing bonus: mean pairwise distance in mm.
+        #    Rewards spreading all pairs, not just the closest.
+        tip_mean = self._mean_pairwise(self.tips)
+        reward += self.dense_reward_weight * tip_mean * 0.1
 
         tx, ty = self.tips[self.active]
 
@@ -663,13 +676,8 @@ class TraceGrowEnv(gym.Env):
             return 0.0
         progress = min(self.rounds_completed / self.num_rounds, 1.0)
 
-        # Spacing signal: same shape as terminal but scaled down
-        ep_min = self._min_pairwise(self.tips)
-        ratio = ep_min / max(self.spacing_threshold, 1e-6)
-        if ratio >= 1.0:
-            spacing_signal = 1.0 * (ratio - 1.0)
-        else:
-            spacing_signal = -0.5 * (1.0 - ratio)
+        # Spacing signal: mean pairwise distance, scaled down for intermediate reward.
+        spacing_signal = self._mean_pairwise(self.tips) * 0.05
 
         # Endpoint proximity penalty (lighter weight than terminal)
         ep_pen = 0.0
@@ -707,23 +715,11 @@ class TraceGrowEnv(gym.Env):
         # No completion bonus: it was constant (+10) so it just shifted all
         # returns up without providing any gradient signal, and the policy
         # exploited it by clustering near walls (small penalty but still
-        # positive net return). Now the only positive reward is for good
-        # spacing with clean endpoints.
-        #
-        # Structure:
-        #   spacing below threshold:   -5 * (1 - ratio)   up to -5
-        #   endpoint violations:       - penalty           up to -8 (8 traces * max 1.0 each)
-        #   spacing above threshold:   +10 * (ratio - 1)  unbounded upward
-        #   endpoint valid + complete: +20 bonus           big positive gate
-        #
-        # Minimum possible: ~-13 (bad spacing + all endpoints near walls)
-        # Maximum early:    ~+21 (spacing=2x threshold, no violations, complete)
-        # The only path to positive return requires BOTH spreading AND valid endpoints.
-        spacing_ratio = ep_min / max(self.spacing_threshold, 1e-6)
-        if spacing_ratio >= 1.0:
-            reward_spacing = 10.0 * (spacing_ratio - 1.0)
-        else:
-            reward_spacing = -5.0 * (1.0 - spacing_ratio)
+        # Spacing reward: mean pairwise distance in mm, no threshold.
+        # Directly maximizes distance between all endpoint pairs.
+        # Scale: 0.5 * mean_mm so 20mm mean -> +10, 40mm -> +20.
+        ep_mean = self._mean_pairwise(endpoints)
+        reward_spacing = ep_mean * 0.5
 
         valid_endpoints = all(
             self._point_clear_of_static(x, y, for_endpoint=True)
@@ -731,14 +727,11 @@ class TraceGrowEnv(gym.Env):
         )
         spacing_ok = ep_min >= self.spacing_threshold if self.num_traces > 1 else True
 
-        # Smooth continuous bonus: replaces binary gate=20.
-        # Scales with spacing ratio AND cleanliness of endpoints.
-        # Always differentiable -- no cliff at the threshold.
-        # High spacing + clean endpoints = large bonus.
-        # Partial spacing or minor violations = smaller but nonzero bonus.
-        spacing_ratio = ep_min / max(self.spacing_threshold, 1e-6)
+        # Completion bonus: mean distance × endpoint cleanliness.
+        # No threshold. Larger mean distance + cleaner endpoints = larger bonus.
+        # Scale: 1.0 * mean_mm so 20mm mean + clean endpoints -> +20.
         clean_fraction = max(0.0, 1.0 - endpoint_penalty / max(self.num_traces, 1))
-        completion_bonus = 20.0 * spacing_ratio * clean_fraction if completed else 0.0
+        completion_bonus = ep_mean * 1.0 * clean_fraction if completed else 0.0
 
         # ── Logging metrics ───────────────────────────────────────────────────
         comp_lengths = [
@@ -754,6 +747,7 @@ class TraceGrowEnv(gym.Env):
         )
         self._terminal_metrics = {
             "min_tp_spacing": ep_min,
+            "mean_tp_spacing": ep_mean,
             "endpoints_valid": 1.0 if valid_endpoints else 0.0,
             "spacing_ok": 1.0 if spacing_ok else 0.0,
             "all_complete": 1.0 if completed else 0.0,
