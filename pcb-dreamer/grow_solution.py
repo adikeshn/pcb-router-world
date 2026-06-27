@@ -88,8 +88,17 @@ class DiverseGrowTracker:
 
     def update(self, inner_env, step: int, source: str = "train") -> Optional[str]:
         m = getattr(inner_env, "_terminal_metrics", None)
-        if not m or m.get("routable", 0.0) != 1.0:
-            return None  # only complete, valid solutions qualify
+        if not m:
+            return None
+
+        # Gate: require completion (all traces fully grown -- an incomplete
+        # layout isn't a usable solution) and no path crossings. We do NOT
+        # require the 13mm spacing / 14mm edge thresholds here -- instead we
+        # record the actual spacing and a 'meets_spec' label. The portfolio
+        # holds the model's best work ranked by spacing; the threshold is a
+        # label you can read off, not a filter that hides near-misses.
+        if m.get("all_complete", 0.0) != 1.0:
+            return None  # incomplete layout, not usable
 
         # Reject solutions with path crossings -- the mask prevents most but
         # sequential routing can produce rare violations where trace A lays a
@@ -117,6 +126,10 @@ class DiverseGrowTracker:
             "total_length": float(m["total_length"]),
             "length_spread": float(m["length_spread"]),
             "reward_terminal": float(m["reward_spacing"] + m["reward_gate"]),
+            # meets_spec is a LABEL, not a filter: True if this layout clears
+            # the 13mm spacing + 14mm edge thresholds. Lets you see at a glance
+            # which portfolio entries are manufacturable as-is.
+            "meets_spec": bool(m.get("routable", 0.0) == 1.0),
             "endpoints": [list(map(float, p)) for p in endpoints],
             "paths": [[list(map(float, pt)) for pt in path]
                       for path in inner_env.get_paths()],
@@ -225,9 +238,10 @@ class DiverseGrowTracker:
         ax.set_xlim(b.x_min - 5, b.x_max + 5)
         ax.set_ylim(b.y_min - 5, b.y_max + 5)
         ax.set_aspect("equal")
-        ax.set_title(f"Solution {rank} (0=best): spacing="
-                     f"{s['min_tp_spacing']:.1f}mm, len={s['total_length']:.0f}mm, "
-                     f"spread={s['length_spread']:.2f}")
+        spec_tag = "MEETS SPEC" if s.get("meets_spec", False) else "below spec"
+        ax.set_title(f"Solution {rank} (0=best): min={s['min_tp_spacing']:.1f}mm "
+                     f"mean={s.get('mean_tp_spacing',0):.1f}mm  [{spec_tag}]\n"
+                     f"len={s['total_length']:.0f}mm, spread={s['length_spread']:.2f}")
         ax.set_xlabel("X (mm)")
         ax.set_ylabel("Y (mm)")
         fig.savefig(str(self.outdir / f"solution_{rank}.png"),
