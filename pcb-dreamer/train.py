@@ -507,10 +507,13 @@ def main():
                          fontsize=10)
             ax.set_xlabel("X (mm)"); ax.set_ylabel("Y (mm)")
             fig.tight_layout()
-            buf = io.BytesIO()
-            fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
-            buf.seek(0); plt.close(fig)
-            wandb_run.log({tag: _wandb.Image(buf)}, step=agent._step)
+            # Save to a PNG file (wandb.Image accepts a path reliably across
+            # versions; passing a raw BytesIO fails on some wandb clients with
+            # "'_io.BytesIO' object has no attribute 'ndim'").
+            png_path = str(logdir / "_live_board.png")
+            fig.savefig(png_path, format="png", dpi=100, bbox_inches="tight")
+            plt.close(fig)
+            wandb_run.log({tag: _wandb.Image(png_path)}, step=agent._step)
         except Exception as e:
             print(f"[wandb board render] {e}")
 
@@ -619,13 +622,12 @@ def main():
                         fontsize=10)
                     ax.set_xlabel("X (mm)"); ax.set_ylabel("Y (mm)")
                     fig.tight_layout()
-                    buf = io.BytesIO()
-                    fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
-                    buf.seek(0)
+                    eval_png = str(logdir / "_live_eval_board.png")
+                    fig.savefig(eval_png, format="png", dpi=100, bbox_inches="tight")
                     plt.close(fig)
                     wandb_run.log({
                         "board/last_eval_episode": _wandb.Image(
-                            buf,
+                            eval_png,
                             caption=(f"min={min_sp:.1f}mm mean={mean_sp:.1f}mm "
                                      f"pen={pen:.2f}")
                         )
