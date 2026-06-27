@@ -466,11 +466,66 @@ def main():
 
     explorer = ForcedExplorer(logdir, _make_explore_env, config)
 
+    # Throttle for training-episode board renders (don't log every episode)
+    _last_board_log = [0]
+    _BOARD_LOG_INTERVAL = 2000  # log a training board image every ~2000 steps
+
+    def _log_board_image(inner, tag, caption_extra=""):
+        """Render the current board state of `inner` env and log to wandb."""
+        if wandb_run is None:
+            return
+        try:
+            import wandb as _wandb
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            import io
+            b = inner.board
+            fig, ax = plt.subplots(figsize=(10, 7))
+            ax.plot([b.x_min,b.x_max,b.x_max,b.x_min,b.x_min],
+                    [b.y_min,b.y_min,b.y_max,b.y_max,b.y_min], "k-", lw=2)
+            for obs_r in b.rect_obstacles:
+                xn,yn,xx,yx = obs_r.bounds
+                ax.add_patch(plt.Rectangle((xn,yn),xx-xn,yx-yn,
+                             fill=True,color="salmon",alpha=0.5,zorder=2))
+            cmap = plt.get_cmap("tab10")
+            for ti, p in enumerate(inner.paths):
+                if len(p) < 2: continue
+                arr = np.array(p)
+                ax.plot(arr[:,0],arr[:,1],"-",color=cmap(ti%10),lw=1.5,zorder=4)
+                ax.plot(arr[-1,0],arr[-1,1],"o",color=cmap(ti%10),
+                        markersize=8,markeredgecolor="k",zorder=6)
+                ax.plot(arr[0,0],arr[0,1],"s",color=cmap(ti%10),markersize=4,zorder=5)
+            mm = inner._terminal_metrics
+            ax.set_xlim(b.x_min-5,b.x_max+5); ax.set_ylim(b.y_min-5,b.y_max+5)
+            ax.set_aspect("equal")
+            ax.set_title(f"Step {agent._step}  |  "
+                         f"min={mm.get('min_tp_spacing',0):.1f}mm "
+                         f"mean={mm.get('mean_tp_spacing',0):.1f}mm "
+                         f"pen={mm.get('endpoint_penalty',0):.2f} "
+                         f"complete={mm.get('all_complete',0):.0f}{caption_extra}",
+                         fontsize=10)
+            ax.set_xlabel("X (mm)"); ax.set_ylabel("Y (mm)")
+            fig.tight_layout()
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+            buf.seek(0); plt.close(fig)
+            wandb_run.log({tag: _wandb.Image(buf)}, step=agent._step)
+        except Exception as e:
+            print(f"[wandb board render] {e}")
+
     def track_episode(env, is_eval):
+        inner = get_inner_env(env)
         status = tracker.update(
-            get_inner_env(env), agent._step,
+            inner, agent._step,
             source=("eval" if is_eval else "train"),
         )
+        # Periodically log the live TRAINING board state (not just at eval and
+        # not just when the portfolio updates) so you can watch the policy's
+        # actual output evolve during training.
+        if (not is_eval) and (agent._step - _last_board_log[0] >= _BOARD_LOG_INTERVAL):
+            _last_board_log[0] = agent._step
+            _log_board_image(inner, "board/training_episode")
         if status:
             print(f"  [solutions] {status}")
             if wandb_run is not None:
@@ -478,6 +533,7 @@ def main():
                 wandb_run.log({
                     "portfolio/size": len(tracker.solutions),
                     "portfolio/best_spacing": best["min_tp_spacing"] if best else float("nan"),
+                    "portfolio/best_reward": best.get("reward_terminal", float("nan")) if best else float("nan"),
                     "portfolio/best_total_length": best["total_length"] if best else float("nan"),
                 }, step=agent._step)
                 # Upload solution PNGs immediately when portfolio updates
@@ -489,7 +545,8 @@ def main():
                         if png.exists():
                             sol_imgs[f"portfolio/solution_{rank}"] = _wandb.Image(
                                 str(png),
-                                caption=(f"rank={rank} min={sol['min_tp_spacing']:.1f}mm "
+                                caption=(f"rank={rank} reward={sol.get('reward_terminal',0):.1f} "
+                                         f"min={sol['min_tp_spacing']:.1f}mm "
                                          f"mean={sol.get('mean_tp_spacing',0):.1f}mm "
                                          f"step={sol['step']}")
                             )

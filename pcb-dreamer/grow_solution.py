@@ -46,8 +46,10 @@ def _match_distances(a_pts, b_pts):
 
 
 def _rank_key(s):
-    # spacing DESC (so negate), then total_length ASC as tiebreaker
-    return (-s["min_tp_spacing"], s["total_length"])
+    # Rank by the actual terminal reward the model earned -- whichever layout
+    # the reward function scores highest IS the best solution. Higher reward
+    # is better, so negate for ascending sort. Tiebreak by total_length ASC.
+    return (-s["reward_terminal"], s["total_length"])
 
 
 def _is_better(cand, other):
@@ -91,14 +93,14 @@ class DiverseGrowTracker:
         if not m:
             return None
 
-        # Gate: require completion (all traces fully grown -- an incomplete
-        # layout isn't a usable solution) and no path crossings. We do NOT
-        # require the 13mm spacing / 14mm edge thresholds here -- instead we
-        # record the actual spacing and a 'meets_spec' label. The portfolio
-        # holds the model's best work ranked by spacing; the threshold is a
-        # label you can read off, not a filter that hides near-misses.
+        # Gate: require completion (all traces reached target length -- a boxed
+        # or incomplete layout isn't usable) and no path crossings (physically
+        # unbuildable). NO spacing/edge thresholds gate entry. The portfolio is
+        # ranked by terminal REWARD, so whichever complete layout the reward
+        # function scores highest is the best solution. meets_spec is recorded
+        # as a label so you can still see which entries clear 13mm/14mm.
         if m.get("all_complete", 0.0) != 1.0:
-            return None  # incomplete layout, not usable
+            return None  # incomplete / boxed-in layout, not usable
 
         # Reject solutions with path crossings -- the mask prevents most but
         # sequential routing can produce rare violations where trace A lays a
@@ -239,8 +241,9 @@ class DiverseGrowTracker:
         ax.set_ylim(b.y_min - 5, b.y_max + 5)
         ax.set_aspect("equal")
         spec_tag = "MEETS SPEC" if s.get("meets_spec", False) else "below spec"
-        ax.set_title(f"Solution {rank} (0=best): min={s['min_tp_spacing']:.1f}mm "
-                     f"mean={s.get('mean_tp_spacing',0):.1f}mm  [{spec_tag}]\n"
+        ax.set_title(f"Solution {rank} (0=best): reward={s.get('reward_terminal',0):.1f}  "
+                     f"min={s['min_tp_spacing']:.1f}mm mean={s.get('mean_tp_spacing',0):.1f}mm  "
+                     f"[{spec_tag}]\n"
                      f"len={s['total_length']:.0f}mm, spread={s['length_spread']:.2f}")
         ax.set_xlabel("X (mm)")
         ax.set_ylabel("Y (mm)")
