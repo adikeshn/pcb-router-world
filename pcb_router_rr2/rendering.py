@@ -13,7 +13,6 @@ import io
 from typing import List, Optional, Sequence
 
 import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Rectangle
