@@ -4,14 +4,14 @@
 board_width_mm: 120.0
 board_height_mm: 180.0
 edge_clearance_mm: 2.0
-connector_rect: [82.0, 167.0, 98.0, 180.0]
+connector_rect: [52.0, 83.5, 68.0, 96.5]
 pins:
-  - [87.0, 178.5]
-  - [90.0, 178.5]
-  - [93.0, 178.5]
-  - [87.0, 171.7]
-  - [90.0, 171.7]
-  - [93.0, 171.7]
+  - [57.0, 96.5]
+  - [60.0, 96.5]
+  - [63.0, 96.5]
+  - [57.0, 83.5]
+  - [60.0, 83.5]
+  - [63.0, 83.5]
 obstacles: []
 
 trace_clearance_mm: 1.33
@@ -30,6 +30,8 @@ breakout_fan_pitch_mm: 8.0
 breakout_fan_step_mm: 1.0
 breakout_fan_safety_mm: 0.05
 breakout_runout_mm: 4.0
+breakout_mode: auto
+breakout_split_min_room_mm: 25.0
 
 n_rays: 16
 ray_max_mm: 20.0

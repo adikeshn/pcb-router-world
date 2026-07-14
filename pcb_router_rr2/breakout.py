@@ -1,42 +1,44 @@
-"""Deterministic two-phase breakout, length-normalised.
+"""Deterministic side-aware breakout, length-normalised.
 
-Phase 1 (clear the connector): each trace descends from its pin toward the
-open side of the board.  Top-row traces first take a short 45-degree "jog"
-into their own lane so they do not collide with the bottom-row pins that
-sit directly beneath them (a failure the naive "straight out" description
-in the v1 doc would have hit).
+Modes (cfg.breakout_mode):
+* "split" — pin rows exit on OPPOSITE sides of the connector: the top row
+  breaks out upward, the bottom row downward.  Each row has a clear column
+  on its own side, so no lane jogs are needed.  This is the natural mode
+  for a connector in the middle of the board.
+* "down" / "up" — every trace exits on one side (the original behaviour
+  for a connector hugging a board edge).  Rows whose escape column is
+  blocked by the other row's pins take a short 45-degree jog into an
+  interleaved lane first.
+* "auto" — "split" when both sides of the connector have at least
+  breakout_split_min_room_mm of board; otherwise exit toward the roomier
+  side.
 
-Phase 2 (fan out): a GRADUAL fan.  A single straight diagonal per trace is
-not clearance-safe: the perpendicular distance from a neighbour's fan
-start to a tilted fan segment is gap * D / L, which drops below clearance
-for any meaningful lateral movement while gaps are still at lane pitch
-(build-time validation caught exactly this at 1.115 mm < 1.33 mm).  So the
-fan descends in small vertical sub-steps, and at each sub-step every trace
-moves laterally toward its target at a rate capped by
+Per group, the phases are: (jog) -> straight escape past the connector ->
+GRADUAL fan -> straight run-out.  The gradual fan descends in small
+vertical sub-steps with per-sub-step lateral movement capped by
     rate <= sqrt((min_gap / (clearance + safety))^2 - 1)
-which guarantees the perpendicular-distance bound stays above clearance.
-As outer traces spread, gaps grow, the cap relaxes, and the fan finishes.
-Lanes and fan targets are matched in x-order so ordering (and hence
-non-crossing) is preserved throughout.
+which keeps the perpendicular distance between adjacent traces' fan
+sub-segments above clearance at every point (a single straight diagonal
+fan violates this near the fan start — caught by build-time validation).
+The straight run-out hands the agent a tip whose recent own path is a
+clean line, not a curled fan tail (which otherwise sits within
+self-clearance of the tip and traps the first steps).
 
-Length normalisation: every polyline is extended straight along its final
-direction until all breakouts share the exact length of the longest one,
-preserving the equal-length-by-construction guarantee end to end.
-
-The full breakout set is validated with the same ClearanceChecker used at
-runtime; if your geometry config makes the breakout invalid you find out
-at env construction, not after an hour of training.
+Finally every polyline is extended along its last direction until all
+share the exact length of the longest one, preserving equal length by
+construction end to end; the whole set is then brute-force validated with
+the same clearance rules the agent lives under.
 """
 from __future__ import annotations
 
 import math
-from typing import List
+from typing import Dict, List
 
 import numpy as np
 
 from .board import Board
 from .config import Config
-from .geometry import ClearanceChecker, seg_seg_dist
+from .geometry import ClearanceChecker, seg_intersects_rect, seg_seg_dist
 
 
 def _polyline_length(pts: np.ndarray) -> float:
@@ -59,99 +61,135 @@ def _simplify(pts: np.ndarray, tol: float = 1e-9) -> np.ndarray:
     return np.asarray(out)
 
 
-def build_breakout(cfg: Config, board: Board) -> List[np.ndarray]:
-    """Returns one polyline (float64 array of points) per trace, all of
-    identical length, ending fanned out below the connector."""
+def _resolve_mode(cfg: Config, board: Board) -> str:
+    mode = cfg.breakout_mode
+    if mode not in ("auto", "split", "up", "down"):
+        raise ValueError(f"Unknown breakout_mode: {mode!r}")
+    if mode != "auto":
+        return mode
+    room_below = board.connector_rect[1]
+    room_above = board.height - board.connector_rect[3]
+    if min(room_above, room_below) >= cfg.breakout_split_min_room_mm:
+        return "split"
+    return "up" if room_above > room_below else "down"
+
+
+def _group_polylines(cfg: Config, board: Board, idxs: List[int],
+                     sign: int, allow_jogs: bool) -> Dict[int, List[List[float]]]:
+    """Build (un-normalised) polylines for one group of traces that all
+    exit on the same side.  sign = +1 exits upward (+y), -1 downward."""
     pins = board.pins
-    n = board.n_traces
     cx0, cy0, cx1, cy1 = board.connector_rect
     conn_cx = 0.5 * (cx0 + cx1)
+    escape_edge = cy1 if sign > 0 else cy0
+    clear_y = escape_edge + sign * (cfg.obstacle_clearance_mm
+                                    + cfg.breakout_clear_margin_mm)
 
-    # The open side: this board's connector hugs the top edge, so we grow
-    # downward (-y).  Generalising to other sides is a straight substitution.
-    clear_y = cy0 - cfg.obstacle_clearance_mm - cfg.breakout_clear_margin_mm
+    # ---- lanes: jog only if another pin in the group blocks the column ---
+    lane_x = {i: float(pins[i, 0]) for i in idxs}
+    if allow_jogs:
+        jog = cfg.breakout_lane_jog_mm
+        for i in idxs:
+            xi, yi = pins[i]
+            blocked = any(
+                j != i
+                and abs(pins[j, 0] - xi) < cfg.trace_clearance_mm
+                and (pins[j, 1] - yi) * sign > 0        # pin ahead on escape path
+                for j in idxs)
+            if blocked:
+                lane_x[i] = xi - jog if xi <= conn_cx else xi + jog
 
-    # ---- lane assignment ------------------------------------------------ #
-    # Bottom row keeps its pin x (its column is free below).  Top row jogs
-    # laterally by breakout_lane_jog_mm to an intermediate lane.  Jog
-    # direction: outer pins jog outward, inner pins jog toward the wider gap.
-    ys = pins[:, 1]
-    top_row = ys >= np.median(ys)
-    lane_x = pins[:, 0].copy()
-    jog = cfg.breakout_lane_jog_mm
-    top_idx = np.where(top_row)[0]
-    for i in top_idx:
-        x = pins[i, 0]
-        lane_x[i] = x - jog if x <= conn_cx else x + jog
-
-    # sanity: all lanes distinct and above trace clearance apart
-    order = np.argsort(lane_x)
-    gaps = np.diff(lane_x[order])
-    if np.any(gaps < cfg.trace_clearance_mm):
+    ordered = sorted(idxs, key=lambda i: lane_x[i])
+    lanes_sorted = np.asarray([lane_x[i] for i in ordered])
+    gaps = np.diff(lanes_sorted)
+    if len(gaps) and gaps.min() < cfg.trace_clearance_mm:
         raise ValueError(
             f"Breakout lanes too close ({gaps.min():.2f} mm < clearance "
             f"{cfg.trace_clearance_mm} mm). Increase breakout_lane_jog_mm "
-            f"or pin pitch."
-        )
+            f"or pin pitch.")
 
-    # ---- fan targets ------------------------------------------------------ #
+    # ---- fan targets: pitch-spread, x-order matched (no crossings) -------
+    n = len(idxs)
     pitch = cfg.breakout_fan_pitch_mm
     span = pitch * (n - 1)
-    fan_left = conn_cx - span / 2.0
-    # keep fan inside the board with margin
     margin = board.edge_clearance + 2.0
+    fan_left = conn_cx - span / 2.0
     fan_left = min(max(fan_left, margin), board.width - margin - span)
-    fan_xs_sorted = fan_left + pitch * np.arange(n)
-    fan_x = np.empty(n)
-    fan_x[order] = fan_xs_sorted          # x-order matched -> no crossings
+    fan_x = {tr: fan_left + pitch * k for k, tr in enumerate(ordered)}
 
-    # ---- gradual fan schedule ------------------------------------------- #
-    # Descend in sub-steps; per sub-step, lateral movement is capped so the
-    # perpendicular distance between adjacent traces' sub-segments can never
-    # fall below (trace clearance + safety).  Rate cap derivation:
-    #   perp >= gap / sqrt(rate^2 + 1)  ->  rate <= sqrt((gap/clr)^2 - 1)
+    # ---- gradual fan schedule (rate-capped, see module docstring) --------
     clr_safe = cfg.trace_clearance_mm + cfg.breakout_fan_safety_mm
     drop = cfg.breakout_fan_step_mm
-    pos = lane_x.copy()
+    pos = {i: lane_x[i] for i in idxs}
+    targets = np.asarray([fan_x[i] for i in ordered])
     y = clear_y
-    fan_pts: List[List[List[float]]] = [[] for _ in range(n)]
-    max_iters = 500
+    fan_pts: Dict[int, List[List[float]]] = {i: [] for i in idxs}
     it = 0
-    while np.max(np.abs(pos - fan_x)) > 1e-6:
+    while max(abs(pos[i] - fan_x[i]) for i in idxs) > 1e-6:
         it += 1
-        if it > max_iters:
+        if it > 500:
             raise ValueError(
                 "Gradual fan failed to converge; lane gaps too close to "
                 "clearance. Increase pin pitch, lane jog, or fan safety.")
-        min_gap = float(np.min(np.diff(pos[order])))
-        if min_gap <= clr_safe:
-            raise ValueError(
-                f"Fan gap collapsed to {min_gap:.3f} mm <= {clr_safe:.3f} mm")
-        rate = math.sqrt((min_gap / clr_safe) ** 2 - 1.0)
+        cur = np.asarray([pos[i] for i in ordered])
+        if n > 1:
+            min_gap = float(np.min(np.diff(cur)))
+            if min_gap <= clr_safe:
+                raise ValueError(
+                    f"Fan gap collapsed to {min_gap:.3f} mm <= {clr_safe:.3f} mm")
+            rate = math.sqrt((min_gap / clr_safe) ** 2 - 1.0)
+        else:
+            rate = math.inf
         max_dx = rate * drop
-        y -= drop
-        step_dx = np.clip(fan_x - pos, -max_dx, max_dx)
-        pos = pos + step_dx
-        for i in range(n):
-            fan_pts[i].append([float(pos[i]), float(y)])
+        y += sign * drop
+        for i in idxs:
+            dx = float(np.clip(fan_x[i] - pos[i], -max_dx, max_dx))
+            pos[i] += dx
+            fan_pts[i].append([pos[i], y])
 
-    # ---- assemble polylines ------------------------------------------------ #
-    polys: List[np.ndarray] = []
-    for i in range(n):
+    # ---- assemble: pin -> (jog) -> escape -> fan -> run-out --------------
+    polys: Dict[int, List[List[float]]] = {}
+    for i in idxs:
         pts = [pins[i].tolist()]
         if abs(lane_x[i] - pins[i, 0]) > 1e-9:
-            # 45-degree jog: drop by the same amount we shift laterally
-            pts.append([lane_x[i], pins[i, 1] - abs(lane_x[i] - pins[i, 0])])
-        pts.append([lane_x[i], clear_y])            # phase 1: descend
-        pts.extend(fan_pts[i])                      # phase 2: gradual fan
-        # straight run-out: hand the agent a tip whose recent own path is
-        # a clean vertical line, not the curled fan tail (which otherwise
-        # sits within self-clearance of the tip and traps the first steps)
+            # 45-degree jog: advance along escape axis by the lateral shift
+            pts.append([lane_x[i],
+                        pins[i, 1] + sign * abs(lane_x[i] - pins[i, 0])])
+        pts.append([lane_x[i], clear_y])
+        pts.extend(fan_pts[i])
         last_y = pts[-1][1]
-        pts.append([fan_x[i], last_y - cfg.breakout_runout_mm])
-        polys.append(_simplify(np.asarray(pts, dtype=np.float64)))
+        pts.append([fan_x[i], last_y + sign * cfg.breakout_runout_mm])
+        polys[i] = pts
+    return polys
 
-    # ---- length normalisation ---------------------------------------------- #
+
+def build_breakout(cfg: Config, board: Board) -> List[np.ndarray]:
+    """Returns one polyline (float64 array) per trace, all of identical
+    length, fanned out on the appropriate side(s) of the connector."""
+    pins = board.pins
+    n = board.n_traces
+    mode = _resolve_mode(cfg, board)
+
+    if mode == "split":
+        ys = pins[:, 1]
+        med = float(np.median(ys))
+        top = [i for i in range(n) if ys[i] >= med]
+        bot = [i for i in range(n) if ys[i] < med]
+        if not top or not bot:
+            raise ValueError(
+                "breakout_mode='split' needs pins on both sides of the "
+                "median row; use 'up' or 'down' for a single-row connector.")
+        raw: Dict[int, List[List[float]]] = {}
+        raw.update(_group_polylines(cfg, board, top, +1, allow_jogs=False))
+        raw.update(_group_polylines(cfg, board, bot, -1, allow_jogs=False))
+    else:
+        sign = +1 if mode == "up" else -1
+        raw = _group_polylines(cfg, board, list(range(n)), sign,
+                               allow_jogs=True)
+
+    polys = [np.asarray(raw[i], dtype=np.float64) for i in range(n)]
+
+    # ---- length normalisation across ALL traces (both sides) ------------ #
     lengths = [_polyline_length(p) for p in polys]
     target = max(lengths)
     for i in range(n):
@@ -160,6 +198,7 @@ def build_breakout(cfg: Config, board: Board) -> List[np.ndarray]:
             d = polys[i][-1] - polys[i][-2]
             d = d / (np.linalg.norm(d) + 1e-12)
             polys[i] = np.vstack([polys[i], polys[i][-1] + d * deficit])
+    polys = [_simplify(p) for p in polys]
 
     lengths = [_polyline_length(p) for p in polys]
     assert max(lengths) - min(lengths) < 1e-6, "breakout normalisation failed"
@@ -170,11 +209,19 @@ def build_breakout(cfg: Config, board: Board) -> List[np.ndarray]:
 
 def _validate_breakout(cfg: Config, board: Board, polys: List[np.ndarray]) -> None:
     """Breakout must obey the same rules the agent will: inside board,
-    clear of keep-outs, and inter-trace clearance respected everywhere.
-    (Pins themselves live inside the connector rect, so the first segment
-    of each polyline is exempt from the keep-out test — it is *escaping*
-    the connector.)"""
+    inter-trace clearance respected everywhere, and NO segment may cross
+    the interior of the connector or any obstacle.  Pins sit ON the
+    connector edge (enforced by Config.validate), so a correct escape
+    segment only touches the footprint boundary at its start point; the
+    keep-out rects are deflated by a hair so boundary contact passes but
+    any genuine interior crossing fails loudly."""
     checker: ClearanceChecker = board.make_checker(cfg)
+
+    eps = 1e-6
+    inner_rects = []
+    for r in board.keepout_rects:
+        if r[2] - r[0] > 2 * eps and r[3] - r[1] > 2 * eps:
+            inner_rects.append((r[0] + eps, r[1] + eps, r[2] - eps, r[3] - eps))
 
     for i, pts in enumerate(polys):
         for k in range(len(pts) - 1):
@@ -184,6 +231,14 @@ def _validate_breakout(cfg: Config, board: Board, polys: List[np.ndarray]) -> No
                 # connector edge; only enforce once clear of the connector
                 if k > 0:
                     raise ValueError(f"Breakout trace {i} seg {k} leaves board area")
+            for r in inner_rects:
+                if seg_intersects_rect(a, b, r):
+                    raise ValueError(
+                        f"Breakout trace {i} seg {k} crosses a keep-out "
+                        f"interior (connector/obstacle). Pins must sit on "
+                        f"the connector edge FACING their escape direction "
+                        f"(top edge for upward escape, bottom edge for "
+                        f"downward); check pins / breakout_mode.")
 
     # inter-trace clearance, brute force (few segments, one-time cost)
     for i in range(len(polys)):
@@ -195,8 +250,7 @@ def _validate_breakout(cfg: Config, board: Board, polys: List[np.ndarray]) -> No
                         raise ValueError(
                             f"Breakout traces {i} and {j} violate clearance "
                             f"({d:.3f} mm < {cfg.trace_clearance_mm} mm). "
-                            f"Adjust lane jog / fan pitch."
-                        )
+                            f"Adjust lane jog / fan pitch.")
 
 
 def breakout_end_directions(polys: List[np.ndarray]) -> np.ndarray:

@@ -25,13 +25,19 @@ class Config:
     edge_clearance_mm: float = 2.0          # copper-to-board-edge keep-out
 
     # Connector footprint rectangle (x0, y0, x1, y1) — a keep-out region.
-    connector_rect: Tuple[float, float, float, float] = (82.0, 167.0, 98.0, 180.0)
+    # Centered on the board so both pin rows have room to escape (top row
+    # breaks out upward, bottom row downward — see breakout_mode).
+    connector_rect: Tuple[float, float, float, float] = (52.0, 83.5, 68.0, 96.5)
 
     # Pin start points (x, y).  3-stacked-on-3, 3 mm pitch (representative
     # pitch kept above trace clearance so masks are valid from step one).
+    # Pins sit ON the connector footprint edge (like real pads on the
+    # connector perimeter): a pin strictly inside the footprint could not
+    # escape without its trace crossing the connector body.  This is
+    # enforced by validate() and again at breakout build time.
     pins: List[Tuple[float, float]] = field(default_factory=lambda: [
-        (87.0, 178.5), (90.0, 178.5), (93.0, 178.5),   # top row    (0,1,2)
-        (87.0, 171.7), (90.0, 171.7), (93.0, 171.7),   # bottom row (3,4,5)
+        (57.0, 96.5), (60.0, 96.5), (63.0, 96.5),      # top row, on top edge
+        (57.0, 83.5), (60.0, 83.5), (63.0, 83.5),      # bottom row, on bottom edge
     ])
 
     # Extra rectangular keep-out obstacles [(x0, y0, x1, y1), ...]
@@ -62,6 +68,11 @@ class Config:
     breakout_fan_step_mm: float = 1.0       # vertical sub-step of the gradual fan
     breakout_fan_safety_mm: float = 0.05    # extra clearance margin during fan
     breakout_runout_mm: float = 4.0         # straight run-out after fan (clean hand-off)
+    # "auto": split rows to opposite sides when both sides of the connector
+    #         have >= breakout_split_min_room_mm of board; otherwise exit
+    #         toward the roomier side.  "split" / "up" / "down" force it.
+    breakout_mode: str = "auto"
+    breakout_split_min_room_mm: float = 25.0
 
     # ------------------------------------------------------------------ #
     # Observation
@@ -193,3 +204,14 @@ class Config:
             assert 0 < x < w and 0 < y <= h, f"pin {i} ({x},{y}) outside board"
         x0, y0, x1, y1 = self.connector_rect
         assert x0 < x1 and y0 < y1, "connector_rect must be (x0,y0,x1,y1)"
+        # No pin may sit strictly INSIDE the connector footprint: a trace
+        # from an interior pin must cross the connector body to escape,
+        # which is forbidden.  Pins belong on the footprint edge (real
+        # connector pads) or outside it entirely.
+        eps = 1e-6
+        for i, (x, y) in enumerate(self.pins):
+            inside = (x0 + eps < x < x1 - eps) and (y0 + eps < y < y1 - eps)
+            assert not inside, (
+                f"pin {i} ({x},{y}) is strictly inside the connector "
+                f"footprint {self.connector_rect}; place pins on the "
+                f"connector edge so traces can escape without crossing it")
