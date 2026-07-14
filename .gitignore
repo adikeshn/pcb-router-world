@@ -1,8 +1,0 @@
-pcb-dreamer/logdir/
-pcb-dreamer/eval_results/
-pcb-dreamer/obs_*.png
-.idea/
-.DS_Store
-__pycache__/
-*.pyc
-*.pyo
