@@ -20,24 +20,29 @@ class Config:
     # pin coordinates require height >= 180, so the board is 120 wide (x)
     # by 180 tall (y).  Adjust here if your board differs.
     # ------------------------------------------------------------------ #
-    board_width_mm: float = 120.0
-    board_height_mm: float = 180.0
+    board_width_mm: float = 180.0
+    board_height_mm: float = 120.0
     edge_clearance_mm: float = 2.0          # copper-to-board-edge keep-out
 
     # Connector footprint rectangle (x0, y0, x1, y1) — a keep-out region.
-    # Centered on the board so both pin rows have room to escape (top row
-    # breaks out upward, bottom row downward — see breakout_mode).
-    connector_rect: Tuple[float, float, float, float] = (52.0, 83.5, 68.0, 96.5)
+    # Horizontally centered, sitting in the lower region of the board
+    # (mirrors the reference layout: most routing room is above, a narrow
+    # channel below).
+    connector_rect: Tuple[float, float, float, float] = (68.0, 18.0, 112.0, 30.0)
 
-    # Pin start points (x, y).  3-stacked-on-3, 3 mm pitch (representative
-    # pitch kept above trace clearance so masks are valid from step one).
+    # Pin start points (x, y): one representative per physical pad pair.
     # Pins sit ON the connector footprint edge (like real pads on the
     # connector perimeter): a pin strictly inside the footprint could not
-    # escape without its trace crossing the connector body.  This is
-    # enforced by validate() and again at breakout build time.
+    # escape without its trace crossing the connector body.  Pins must
+    # also be separated by more than trace_clearance_mm, because with no
+    # breakout the very first agent segments must already respect
+    # trace-to-trace clearance.  Both rules are enforced by validate().
     pins: List[Tuple[float, float]] = field(default_factory=lambda: [
-        (57.0, 96.5), (60.0, 96.5), (63.0, 96.5),      # top row, on top edge
-        (57.0, 83.5), (60.0, 83.5), (63.0, 83.5),      # bottom row, on bottom edge
+        # 7 on the top edge (y = 30)
+        (71.0, 30.0), (76.5, 30.0), (82.0, 30.0), (87.5, 30.0),
+        (93.0, 30.0), (98.5, 30.0), (104.0, 30.0),
+        # 3 on the bottom edge (y = 18)
+        (74.0, 18.0), (90.0, 18.0), (106.0, 18.0),
     ])
 
     # Extra rectangular keep-out obstacles [(x0, y0, x1, y1), ...]
@@ -54,6 +59,11 @@ class Config:
     # Growth mechanics
     # ------------------------------------------------------------------ #
     step_mm: float = 1.0                    # growth increment per action
+    # No-breakout mode (default): the agent starts directly at the pins.
+    # While a tip is inside a keep-out clearance halo, only moves that
+    # monotonically INCREASE distance from that keep-out (and never touch
+    # its body) are valid; once outside, full clearance applies forever.
+    use_breakout: bool = False
     budget_min_mm: float = 25.0             # per-episode sampled growth budget
     budget_max_mm: float = 45.0             #   (post-breakout, per trace)
     self_skip_mm: float = 2.0               # own path arc-length exempt from self check
@@ -133,7 +143,7 @@ class Config:
     # ------------------------------------------------------------------ #
     explorer_every_episodes: int = 200      # run ForcedExplorer every N train episodes
     explorer_episodes: int = 5              # random episodes per burst
-    explorer_momentum: float = 0.9          # persistent-walk repeat probability
+    explorer_momentum: float = 0.95         # persistent-walk repeat probability
     eval_every_steps: int = 100_000         # deterministic eval suite cadence
     eval_episodes: int = 8
     render_every_episodes: int = 250        # log a rendered training board every N eps
@@ -204,6 +214,17 @@ class Config:
             assert 0 < x < w and 0 < y <= h, f"pin {i} ({x},{y}) outside board"
         x0, y0, x1, y1 = self.connector_rect
         assert x0 < x1 and y0 < y1, "connector_rect must be (x0,y0,x1,y1)"
+        # Pins must be separated beyond trace clearance: with no breakout,
+        # the first agent segments grow directly from the pins and must
+        # already satisfy trace-to-trace clearance against neighbours.
+        import math as _math
+        for i in range(len(self.pins)):
+            for j in range(i + 1, len(self.pins)):
+                d = _math.dist(self.pins[i], self.pins[j])
+                assert d > self.trace_clearance_mm, (
+                    f"pins {i} and {j} are {d:.2f} mm apart, which is not "
+                    f"beyond trace_clearance_mm={self.trace_clearance_mm}; "
+                    f"widen the pin pitch (each pin represents its pad pair)")
         # No pin may sit strictly INSIDE the connector footprint: a trace
         # from an interior pin must cross the connector body to escape,
         # which is forbidden.  Pins belong on the footprint edge (real

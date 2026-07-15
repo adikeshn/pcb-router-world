@@ -52,8 +52,12 @@ class RoundRobinTraceEnv(gym.Env):
         self.board = Board.from_config(cfg)
         self.n = self.board.n_traces
         self.checker = self.board.make_checker(cfg)
-        self.breakout = build_breakout(cfg, self.board)
-        self._breakout_dirs = breakout_end_directions(self.breakout)
+        if cfg.use_breakout:
+            self.breakout = build_breakout(cfg, self.board)
+            self._breakout_dirs = breakout_end_directions(self.breakout)
+        else:
+            self.breakout = None
+            self._breakout_dirs = None
         self.rng = np.random.default_rng(seed)
 
         self.action_space = gym.spaces.Discrete(8)
@@ -82,13 +86,25 @@ class RoundRobinTraceEnv(gym.Env):
 
         self.checker.reset()
         self.paths = []
-        for tid, poly in enumerate(self.breakout):
-            self.paths.append([p.copy() for p in poly])
-            self.checker.add_polyline(tid, [tuple(p) for p in poly])
-        self._breakout_pts = [len(p) for p in self.breakout]
-
-        self.last_dir_idx = np.asarray(
-            [nearest_dir_index(d) for d in self._breakout_dirs], dtype=np.int64)
+        if self.cfg.use_breakout:
+            for tid, poly in enumerate(self.breakout):
+                self.paths.append([p.copy() for p in poly])
+                self.checker.add_polyline(tid, [tuple(p) for p in poly])
+            self._breakout_pts = [len(p) for p in self.breakout]
+            self.last_dir_idx = np.asarray(
+                [nearest_dir_index(d) for d in self._breakout_dirs],
+                dtype=np.int64)
+        else:
+            for tid in range(self.n):
+                pin = self.board.pins[tid].copy()
+                self.paths.append([pin])
+                # degenerate zero-length segment: the pin is copper other
+                # traces must clear from step one, even before it moves
+                self.checker.add_segment(tid, (pin[0], pin[1]),
+                                         (pin[0], pin[1]))
+            self._breakout_pts = [1] * self.n
+            # -1 sentinel: no heading yet, so no reverse ban on first step
+            self.last_dir_idx = np.full(self.n, -1, dtype=np.int64)
 
         budget = opts.get("budget_mm")
         if budget is None:
@@ -121,7 +137,9 @@ class RoundRobinTraceEnv(gym.Env):
         tip = self.paths[tid][-1]
         mask = np.zeros(8, dtype=bool)
         step = self.cfg.step_mm
-        banned = (self.last_dir_idx[tid] + 4) % 8 if self.cfg.ban_reverse else -1
+        banned = ((self.last_dir_idx[tid] + 4) % 8
+                  if (self.cfg.ban_reverse and self.last_dir_idx[tid] >= 0)
+                  else -1)
         for k in range(8):
             if k == banned:
                 continue
@@ -284,7 +302,8 @@ class RoundRobinTraceEnv(gym.Env):
         norm_tips = (tips / np.asarray([w, h])) * 2.0 - 1.0
         parts.append(norm_tips.ravel())
 
-        headings = DIRS[self.last_dir_idx]
+        headings = np.asarray([
+            DIRS[d] if d >= 0 else (0.0, 0.0) for d in self.last_dir_idx])
         parts.append(headings.ravel())
 
         one_hot = np.zeros(self.n)

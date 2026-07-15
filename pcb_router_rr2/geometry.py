@@ -63,6 +63,13 @@ def rect_inflate(r: Rect, m: float) -> Rect:
     return (r[0] - m, r[1] - m, r[2] + m, r[3] + m)
 
 
+def rect_distance(p: Point, r: Rect) -> float:
+    """Euclidean distance from point p to rectangle r (0 inside/on it)."""
+    dx = max(r[0] - p[0], 0.0, p[0] - r[2])
+    dy = max(r[1] - p[1], 0.0, p[1] - r[3])
+    return math.hypot(dx, dy)
+
+
 def point_in_rect(p: Point, r: Rect) -> bool:
     return r[0] <= p[0] <= r[2] and r[1] <= p[1] <= r[3]
 
@@ -154,7 +161,15 @@ class ClearanceChecker:
         self.trace_clr = trace_clearance
         self.self_clr = self_clearance
         self.self_skip_mm = self_skip_mm
+        self.raw_keepouts: List[Rect] = list(keepout_rects)
         self.inflated_keepouts: List[Rect] = [rect_inflate(r, obstacle_clearance) for r in keepout_rects]
+        eps = 1e-6
+        self.inner_keepouts: List[Rect] = [
+            (r[0] + eps, r[1] + eps, r[2] - eps, r[3] - eps)
+            if (r[2] - r[0] > 2 * eps and r[3] - r[1] > 2 * eps) else r
+            for r in keepout_rects]
+        # minimum outward progress per step while escaping a keep-out halo
+        self.escape_progress_mm = 0.25
         self.hash = SegmentHash(cell_mm)
         # per-trace segment count + cumulative arc length at each segment's
         # END, so "recent own path" is defined by DISTANCE along the path
@@ -198,6 +213,31 @@ class ClearanceChecker:
     def seg_hits_keepout(self, a: Point, b: Point) -> bool:
         return any(seg_intersects_rect(a, b, r) for r in self.inflated_keepouts)
 
+    def keepout_segment_ok(self, a: Point, b: Point) -> bool:
+        """Keep-out rule with an ESCAPE MODE for pins on the footprint edge.
+
+        Per keep-out rect: if the current tip `a` is inside that rect's
+        clearance-inflated halo (true for a pin sitting on the footprint
+        edge), the move is valid only if it (1) never touches the rect
+        body's interior and (2) strictly increases the tip's distance from
+        the rect by at least escape_progress_mm — a monotone escape.  Once
+        the tip is outside the halo, the standard rule applies: the segment
+        may not come within obstacle clearance of the rect, which also
+        makes re-entering the halo impossible.  When a breakout is used
+        tips never start inside a halo, so this reduces exactly to the old
+        behaviour."""
+        for raw, infl, inner in zip(self.raw_keepouts, self.inflated_keepouts,
+                                    self.inner_keepouts):
+            if point_in_rect(a, infl):
+                if seg_intersects_rect(a, b, inner):
+                    return False
+                if rect_distance(b, raw) < rect_distance(a, raw) + self.escape_progress_mm:
+                    return False
+            else:
+                if seg_intersects_rect(a, b, infl):
+                    return False
+        return True
+
     def seg_min_dists(self, trace_id: int, a: Point, b: Point) -> Tuple[float, float]:
         """(min distance to OTHER traces' segments,
             min distance to OWN non-recent segments) for proposed segment ab.
@@ -226,7 +266,7 @@ class ClearanceChecker:
         """
         if not self.point_in_board(b):
             return False, math.inf
-        if self.seg_hits_keepout(a, b):
+        if not self.keepout_segment_ok(a, b):
             return False, math.inf
         d_other, d_own = self.seg_min_dists(trace_id, a, b)
         if d_other < self.trace_clr:

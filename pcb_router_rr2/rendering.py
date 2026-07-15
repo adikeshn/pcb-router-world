@@ -13,6 +13,11 @@ import io
 from typing import List, Optional, Sequence
 
 import matplotlib
+# Don't force a backend here. savefig() works on any backend, and forcing
+# "Agg" at import time overrides a notebook's "%matplotlib inline" (Agg is
+# headless-only and never draws to screen), which is why plt.show() would
+# silently no-op in Colab. Scripts/headless contexts that need Agg should
+# set MPLBACKEND=Agg in the environment before importing this module.
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Rectangle
@@ -95,22 +100,31 @@ def render_board(
 
 
 def preview_figure(cfg: Config, save_path: Optional[str] = None):
-    """Pre-training layout check: startpoints, obstacles, board dims, and
-    the deterministic breakout with agent hand-off tips."""
-    breakout = build_breakout(cfg, Board.from_config(cfg))
-    lens = [float(np.sum(np.linalg.norm(np.diff(p, axis=0), axis=1)))
-            for p in breakout]
-    fig = render_board(
+    """Pre-training layout check: startpoints, obstacles, board dims —
+    and, only if a breakout is enabled, the deterministic breakout with
+    its agent hand-off tips."""
+    if cfg.use_breakout:
+        breakout = build_breakout(cfg, Board.from_config(cfg))
+        lens = [float(np.sum(np.linalg.norm(np.diff(p, axis=0), axis=1)))
+                for p in breakout]
+        return render_board(
+            cfg,
+            paths=[p.tolist() for p in breakout],
+            breakout_points=[len(p) for p in breakout],
+            title="Pre-training layout preview",
+            subtitle=(f"dotted = deterministic breakout ({lens[0]:.1f} mm "
+                      f"each, normalised) | squares = agent hand-off tips | "
+                      f"dashed = edge clearance"),
+            save_path=save_path,
+        )
+    return render_board(
         cfg,
-        paths=[p.tolist() for p in breakout],
-        breakout_points=[len(p) for p in breakout],
         title="Pre-training layout preview",
-        subtitle=(f"dotted = deterministic breakout ({lens[0]:.1f} mm each, "
-                  f"normalised) | squares = agent hand-off tips | "
+        subtitle=(f"{cfg.n_traces} traces | no breakout: agent grows "
+                  f"directly from the numbered pins | "
                   f"dashed = edge clearance"),
         save_path=save_path,
     )
-    return fig
 
 
 def episode_figure(cfg: Config, episode_data: dict,
