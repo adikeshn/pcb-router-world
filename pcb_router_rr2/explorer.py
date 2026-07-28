@@ -1,13 +1,11 @@
-"""ForcedExplorer: full episodes under masked-random walk profiles.
+"""ForcedExplorer: masked-random episodes that seed the portfolio.
 
-PPO is on-policy so these episodes never enter training -- they exist purely
-to keep seeding the portfolio with layouts outside the current policy's basin.
+PPO is on-policy so these never enter training. They exist only to offer the
+portfolio layouts outside the current policy's basin.
 
-The walk rotates three profiles because they trade off differently (measured
-on the 10-trace no-breakout board): PERSISTENT (repeat previous direction
-w.p. momentum) completes most episodes; SPREAD-SEEKING (step away from the
-nearest other tip) completes fewer but reaches near-spec endpoint spacing;
-UNIFORM completes worst but adds layout diversity.
+Honest caveat: at the full growth budget on this board, random-policy
+completion is ~0%, so the explorer contributes little. Do not rely on it for
+portfolio diversity -- that is the diversity filter's job.
 """
 from __future__ import annotations
 
@@ -23,7 +21,6 @@ from .portfolio import Portfolio
 def run_random_episode(env: RoundRobinTraceEnv, rng: np.random.Generator,
                        budget_mm: Optional[float] = None,
                        momentum: float = 0.0, spread_bias: float = 0.0) -> Dict:
-    from .env import DIRS
     options = {"budget_mm": budget_mm} if budget_mm is not None else None
     env.reset(options=options)
     last: Dict[int, int] = {}
@@ -44,7 +41,8 @@ def run_random_episode(env: RoundRobinTraceEnv, rng: np.random.Generator,
                 others = np.delete(tips, tid, axis=0)
                 best_a, best_d = int(valid[0]), -1.0
                 for k in valid:
-                    d = float(np.min(np.linalg.norm(others - (tip + DIRS[k]), axis=1)))
+                    d = float(np.min(np.linalg.norm(
+                        others - (tip + env.DIRS[k] * env.cfg.step_mm), axis=1)))
                     if d > best_d:
                         best_d, best_a = d, int(k)
                 action = best_a
@@ -64,24 +62,24 @@ class ForcedExplorer:
         self.rng = np.random.default_rng(seed)
         self.total_episodes = 0
 
-    def run_burst(self, n_episodes: Optional[int] = None) -> Dict[str, float]:
+    def run_burst(self, n_episodes: Optional[int] = None,
+                  episode: Optional[int] = None,
+                  steps: Optional[int] = None) -> Dict[str, float]:
         n = n_episodes or self.cfg.explorer_episodes
         profiles = [(self.cfg.explorer_momentum, 0.0), (0.7, 0.25),
                     (self.cfg.explorer_momentum, 0.0), (0.0, 0.0)]
         added = completes = 0
+        survived = []
         for k in range(n):
             momentum, spread = profiles[k % len(profiles)]
-            # sample budgets across the full range so every portfolio band
-            # gets exploration pressure, not just the short end
-            lo, hi = self.cfg.budget_min_mm, self.cfg.budget_max_mm
-            nb = self.cfg.portfolio_bands
-            budget = lo + (hi - lo) * ((k % nb) + 0.5) / nb
-            ed = run_random_episode(self.env, self.rng, budget_mm=budget,
+            ed = run_random_episode(self.env, self.rng,
                                     momentum=momentum, spread_bias=spread)
             self.total_episodes += 1
             completes += int(ed["complete"])
-            if self.portfolio.consider(ed):
+            survived.append(ed["frac_survived"])
+            if self.portfolio.consider(ed, episode=episode, steps=steps):
                 added += 1
         return {"explorer/episodes_total": float(self.total_episodes),
                 "explorer/burst_complete_rate": completes / max(n, 1),
+                "explorer/burst_frac_survived": float(np.mean(survived)),
                 "explorer/burst_portfolio_adds": float(added)}

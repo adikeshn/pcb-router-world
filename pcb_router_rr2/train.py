@@ -33,9 +33,17 @@ def make_env(cfg: Config, seed: int):
     return _thunk
 
 
+def linear_schedule(initial: float):
+    """Anneal linearly to zero. Constant LR across millions of steps is
+    destabilising late in training and contributed to a policy collapse."""
+    def f(progress_remaining: float) -> float:
+        return progress_remaining * initial
+    return f
+
+
 def train(cfg: Config, resume_model: Optional[str] = None) -> str:
     cfg.validate()
-    run_name = cfg.wandb_run_name or f"rr3_{time.strftime('%Y%m%d_%H%M%S')}"
+    run_name = cfg.wandb_run_name or f"rr5_{time.strftime('%Y%m%d_%H%M%S')}"
     run_dir = os.path.join(cfg.out_dir, run_name)
     os.makedirs(run_dir, exist_ok=True)
     cfg.save_yaml(os.path.join(run_dir, "config.yaml"))
@@ -53,11 +61,13 @@ def train(cfg: Config, resume_model: Optional[str] = None) -> str:
     except ImportError:
         tb_dir = None
 
+    lr = linear_schedule(cfg.learning_rate) if cfg.lr_anneal else cfg.learning_rate
+
     if resume_model:
         model = MaskablePPO.load(resume_model, env=venv, device=cfg.device)
         print(f"Resumed from {resume_model}")
     else:
-        model = MaskablePPO("MlpPolicy", venv, learning_rate=cfg.learning_rate,
+        model = MaskablePPO("MlpPolicy", venv, learning_rate=lr,
                             n_steps=cfg.n_steps, batch_size=cfg.batch_size,
                             n_epochs=cfg.n_epochs, gamma=cfg.gamma,
                             gae_lambda=cfg.gae_lambda, ent_coef=cfg.ent_coef,
@@ -66,7 +76,11 @@ def train(cfg: Config, resume_model: Optional[str] = None) -> str:
                             tensorboard_log=tb_dir, seed=cfg.seed,
                             device=cfg.device, verbose=1)
 
-    callback = RouterCallback(cfg, portfolio, run_dir)
+    print(f"episode = {cfg.budget_rounds} rounds x {cfg.n_traces} traces = "
+          f"{cfg.episode_steps} steps | gamma {cfg.gamma} -> horizon "
+          f"{1/(1-cfg.gamma):.0f} ({1/(1-cfg.gamma)/cfg.episode_steps:.1f}x episode)")
+
+    callback = RouterCallback(cfg, portfolio, run_dir, verbose=1)
     try:
         import tqdm, rich  # noqa: F401
         progress = True
@@ -78,18 +92,26 @@ def train(cfg: Config, resume_model: Optional[str] = None) -> str:
     except KeyboardInterrupt:
         print("Interrupted - saving current model and portfolio.")
 
-    portfolio.render(force=True)   # final render of every entry
-    model_path = os.path.join(run_dir, "model_final.zip")
-    model.save(model_path)
-    print(f"Model saved to {model_path}")
-    print(f"Portfolio ({len(portfolio.entries)} entries) in "
+    model.save(os.path.join(run_dir, "model_final.zip"))
+    portfolio.render(force=True)
+    print(f"\nmodel_final.zip saved")
+    if callback.best_eval_gate >= 0:
+        print(f"model_best.zip  = step {callback.best_eval_step:,} "
+              f"(eval gate-pass {callback.best_eval_gate:.0%})")
+    print(f"portfolio ({len(portfolio.entries)} entries) in "
           f"{os.path.join(run_dir, cfg.portfolio_dir)}")
 
     if wandb is not None and wandb.run is not None:
         for k, v in portfolio.summary().items():
             wandb.run.summary[f"portfolio/{k}"] = v
-        imgs = [wandb.Image(p, caption=f"rank {i}")
-                for i, p in enumerate(portfolio.render(force=True))]
+        wandb.run.summary["eval/best_gate_pass_rate"] = callback.best_eval_gate
+        wandb.run.summary["eval/best_at_step"] = callback.best_eval_step
+        imgs = []
+        for i, p in enumerate(portfolio.render(force=True)):
+            e = portfolio.entries[i]
+            imgs.append(wandb.Image(p, caption=(
+                f"rank {i} | terminal {e['reward_terminal']:.2f} | "
+                f"found at episode {e.get('found_at_episode')}")))
         if imgs:
             wandb.log({"board/final_portfolio": imgs})
         wandb.finish()

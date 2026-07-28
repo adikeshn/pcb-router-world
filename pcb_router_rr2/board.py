@@ -41,7 +41,9 @@ class Board:
             keepout_rects=self.keepout_rects,
             obstacle_clearance=cfg.obstacle_clearance_mm,
             trace_clearance=cfg.trace_clearance_mm,
-            self_clearance=cfg.self_clearance_mm)
+            self_clearance=cfg.self_clearance_mm,
+            self_lookback_mm=cfg.self_lookback_mm,
+            soft_radius_mm=max(cfg.path_soft_mm, cfg.self_soft_mm))
 
     def summary(self) -> str:
         L = [f"Board          : {self.width:.1f} x {self.height:.1f} mm "
@@ -51,10 +53,7 @@ class Board:
              f"Traces / pins  : {self.n_traces}"]
         for i, (x, y) in enumerate(self.pins):
             L.append(f"    pin {i}: ({x:.2f}, {y:.2f})")
-        if self.obstacles:
-            L.append(f"Obstacles      : {len(self.obstacles)}")
-            for r in self.obstacles:
-                L.append(f"    rect x[{r[0]:.1f},{r[2]:.1f}] y[{r[1]:.1f},{r[3]:.1f}]")
-        else:
-            L.append("Obstacles      : none")
+        L.append(f"Obstacles      : {len(self.obstacles) or 'none'}")
+        for r in self.obstacles:
+            L.append(f"    rect x[{r[0]:.1f},{r[2]:.1f}] y[{r[1]:.1f},{r[3]:.1f}]")
         return "\n".join(L)

@@ -1,16 +1,16 @@
-"""Round-robin trace-growth PCB router (MaskablePPO edition).
+"""Round-robin trace-growth PCB router (MaskablePPO, fixed budget).
 
-config     : single dataclass holding every tunable parameter
+config     : every tunable parameter
 geometry   : clearance-inflated collision primitives + spatial hash
 board      : board / connector / pin / obstacle specification
 breakout   : optional deterministic breakout (default: disabled)
 env        : gymnasium round-robin growth environment
-rendering  : matplotlib board rendering (preview + episode renders)
-portfolio  : budget-stratified solution portfolio
-explorer   : ForcedExplorer (profile-rotating masked-random episodes)
-callbacks  : W&B logging, portfolio harvesting, eval, explorer scheduling
-validate   : acceptance tests (zero-violation, self-crossing, reward scale)
+rendering  : board rendering (preview, episode-stamped renders)
+portfolio  : diverse top-K solution portfolio
+explorer   : ForcedExplorer (masked-random episodes)
+callbacks  : W&B logging, portfolio, eval, checkpointing, collapse guard
+validate   : synthetic acceptance tests
 train      : training entry point
 """
 
-__version__ = "3.0.0"
+__version__ = "5.0.0"

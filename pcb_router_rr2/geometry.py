@@ -1,20 +1,25 @@
 """Clearance-inflated collision geometry + spatial hash.
 
 Every validity decision funnels through this module so masking, ray-casting
-and the end-of-episode audit are guaranteed to agree with each other.
+and the end-of-episode audit are guaranteed to agree.
 
-SELF-EXEMPTION RULE
--------------------
-Two segments of the SAME trace are exempt from the self-clearance check only
-when they are topologically ADJACENT (|i - j| <= 1), i.e. they share an
-endpoint and are therefore trivially at distance zero.
+TWO SELF-DISTANCE MEASUREMENTS, deliberately separate
+-----------------------------------------------------
+* d_self_adjacent -- minimum over all NON-ADJACENT own segments (|i-j| > 1).
+  Used for the HARD clearance check.  Pinned near step_mm by geometry
+  (segments two apart sit exactly step_mm away even on a straight run), so it
+  carries no shape information.
+* d_self_far -- minimum over own segments more than `self_lookback_mm` behind
+  along the path.  Used for the SOFT coiling penalty.  This is the one that
+  actually detects a trace curling back on itself.
 
-This replaces an earlier arc-length window, which had a proven blind spot:
-a 3-step sequence N, SE, W is a legal action sequence (no 180 reversal) whose
-third segment genuinely CROSSES the first, yet the two sat within the
-arc-length window and were never checked -- so neither the mask nor the audit
-reported a violation.  Adjacency has no such hole and is robust to variable
-segment lengths (adjacent segments share an endpoint whatever their length).
+Sharing one measurement between these jobs made the soft penalty inert in an
+earlier version: it fired on every step of every trace regardless of shape.
+
+The hard check uses adjacency (not an arc-length window) because an
+arc-length window had a proven blind spot: the 3-step fold N, SE, W is a
+legal action sequence whose third segment genuinely crosses the first, yet
+both sat inside the window and were never checked.
 """
 from __future__ import annotations
 
@@ -77,8 +82,6 @@ def seg_intersects_rect(a: Point, b: Point, r: Rect) -> bool:
 
 # --------------------------------------------------------------------------- #
 class SegmentHash:
-    """Uniform-grid spatial hash over segments."""
-
     def __init__(self, cell_mm: float = 4.0):
         self.cell = float(cell_mm)
         self.grid: Dict[Tuple[int, int], List[Tuple]] = {}
@@ -119,11 +122,15 @@ class SegmentHash:
 class ClearanceChecker:
     def __init__(self, board_w, board_h, edge_clearance, keepout_rects,
                  obstacle_clearance, trace_clearance, self_clearance,
+                 self_lookback_mm: float, soft_radius_mm: float,
                  cell_mm: float = 4.0):
         self.w, self.h = board_w, board_h
         self.edge = edge_clearance
         self.trace_clr = trace_clearance
         self.self_clr = self_clearance
+        self.self_lookback = self_lookback_mm
+        # how far out the soft-penalty query needs to look
+        self.soft_radius = soft_radius_mm
         self.raw_keepouts: List[Rect] = list(keepout_rects)
         self.inflated_keepouts: List[Rect] = [
             rect_inflate(r, obstacle_clearance) for r in keepout_rects]
@@ -135,11 +142,13 @@ class ClearanceChecker:
         self.escape_progress_mm = 0.25
         self.hash = SegmentHash(cell_mm)
         self.seg_count: Dict[int, int] = {}
+        self.seg_end_len: Dict[int, List[float]] = {}   # cumulative arc length
 
     # -- mutation --------------------------------------------------------- #
     def reset(self) -> None:
         self.hash.clear()
         self.seg_count.clear()
+        self.seg_end_len.clear()
 
     def add_polyline(self, trace_id: int, pts: Sequence[Point]) -> None:
         for k in range(len(pts) - 1):
@@ -149,11 +158,9 @@ class ClearanceChecker:
         idx = self.seg_count.get(trace_id, 0)
         self.hash.add_segment(trace_id, idx, a, b)
         self.seg_count[trace_id] = idx + 1
-
-    def _own_exempt(self, trace_id: int, sidx: int) -> bool:
-        """Adjacency-only exemption: the segment about to be placed has index
-        n = seg_count, so only segment n-1 shares an endpoint with it."""
-        return sidx >= self.seg_count.get(trace_id, 0) - 1
+        lens = self.seg_end_len.setdefault(trace_id, [])
+        prev = lens[-1] if lens else 0.0
+        lens.append(prev + math.hypot(b[0] - a[0], b[1] - a[1]))
 
     # -- queries ---------------------------------------------------------- #
     def point_in_board(self, p: Point) -> bool:
@@ -164,12 +171,7 @@ class ClearanceChecker:
         return any(point_in_rect(p, r) for r in self.inflated_keepouts)
 
     def keepout_segment_ok(self, a: Point, b: Point) -> bool:
-        """Keep-out rule with an ESCAPE MODE for pins on the footprint edge.
-
-        If the tip `a` is inside a rect's clearance halo (true for a pin on the
-        footprint edge), the move must never touch the rect body and must
-        strictly increase distance from it.  Once outside the halo the standard
-        rule applies, which also makes re-entering impossible."""
+        """Keep-out rule with ESCAPE MODE for pins on the footprint edge."""
         for raw, infl, inner in zip(self.raw_keepouts, self.inflated_keepouts,
                                     self.inner_keepouts):
             if point_in_rect(a, infl):
@@ -182,49 +184,60 @@ class ClearanceChecker:
                     return False
         return True
 
-    def seg_min_dists(self, trace_id: int, a: Point, b: Point) -> Tuple[float, float]:
-        """(min distance to OTHER traces, min distance to OWN non-adjacent
-        segments) for the proposed segment ab."""
-        radius = max(self.trace_clr, self.self_clr) + self.escape_progress_mm + 4.0
-        min_other = math.inf
-        min_own = math.inf
+    def seg_min_dists(self, trace_id: int, a: Point, b: Point) -> Tuple[float, float, float]:
+        """(d_other, d_self_adjacent, d_self_far) for the proposed segment ab."""
+        radius = max(self.trace_clr, self.self_clr, self.soft_radius) + 0.5
+        n_own = self.seg_count.get(trace_id, 0)
+        lens = self.seg_end_len.get(trace_id, [])
+        tip_len = lens[-1] if lens else 0.0
+        d_other = math.inf
+        d_self_adj = math.inf
+        d_self_far = math.inf
         for (tid, sidx, ax, ay, bx, by) in self.hash.near_segment(a, b, radius):
             d = seg_seg_dist(a, b, (ax, ay), (bx, by))
             if tid != trace_id:
-                if d < min_other:
-                    min_other = d
-            elif not self._own_exempt(trace_id, sidx):
-                if d < min_own:
-                    min_own = d
-        return min_other, min_own
+                if d < d_other:
+                    d_other = d
+                continue
+            # own segment
+            if sidx < n_own - 1:                    # non-adjacent -> hard check
+                if d < d_self_adj:
+                    d_self_adj = d
+            if sidx < len(lens) and (tip_len - lens[sidx]) >= self.self_lookback:
+                if d < d_self_far:                  # far behind -> soft check
+                    d_self_far = d
+        return d_other, d_self_adj, d_self_far
 
     def segment_valid(self, trace_id: int, a: Point, b: Point) -> Tuple[bool, float, float]:
-        """Returns (valid, min_other_trace_distance, min_self_distance).
-        Both distances feed the dense reward terms."""
+        """Returns (valid, d_other, d_self_far). d_self_far feeds the soft
+        coiling penalty; the hard self check is applied internally."""
         if not self.point_in_board(b):
             return False, math.inf, math.inf
         if not self.keepout_segment_ok(a, b):
             return False, math.inf, math.inf
-        d_other, d_own = self.seg_min_dists(trace_id, a, b)
+        d_other, d_self_adj, d_self_far = self.seg_min_dists(trace_id, a, b)
         if d_other < self.trace_clr:
-            return False, d_other, d_own
-        if d_own < self.self_clr:
-            return False, d_other, d_own
-        return True, d_other, d_own
+            return False, d_other, d_self_far
+        if d_self_adj < self.self_clr:
+            return False, d_other, d_self_far
+        return True, d_other, d_self_far
 
     def point_free(self, trace_id: int, p: Point) -> bool:
         if not self.point_in_board(p) or self.point_in_keepout(p):
             return False
         radius = max(self.trace_clr, self.self_clr) + 0.5
+        n_own = self.seg_count.get(trace_id, 0)
         for (tid, sidx, ax, ay, bx, by) in self.hash.near_point(p, radius):
             d = seg_point_dist((ax, ay), (bx, by), p)
             if tid != trace_id and d < self.trace_clr:
                 return False
-            if tid == trace_id and not self._own_exempt(trace_id, sidx) and d < self.self_clr:
+            if tid == trace_id and sidx < n_own - 1 and d < self.self_clr:
                 return False
         return True
 
     def ray_distance(self, trace_id, origin, direction, max_mm, step_mm=1.0) -> float:
+        """Ray resolution is independent of the action step size, so
+        perception stays fine-grained even with coarse growth steps."""
         d = step_mm
         while d <= max_mm + 1e-9:
             p = (origin[0] + direction[0] * d, origin[1] + direction[1] * d)
@@ -238,10 +251,10 @@ class ClearanceChecker:
 def audit_paths(paths: Sequence[np.ndarray], trace_clearance: float,
                 self_clearance: float) -> Tuple[int, float, float]:
     """Brute-force final check, deliberately not sharing code with the spatial
-    hash so it can catch hash bugs as well as mask bugs.
+    hash so it catches hash bugs as well as mask bugs.  Same adjacency-only
+    self-exemption as the live checker.
 
-    Uses the SAME adjacency-only self-exemption as the live checker.
-    Returns (violation_count, min_inter_trace_distance, min_self_distance)."""
+    Returns (violations, min_inter_trace_distance, min_self_distance)."""
     segs = []
     for tid, pts in enumerate(paths):
         for k in range(len(pts) - 1):
@@ -256,20 +269,20 @@ def audit_paths(paths: Sequence[np.ndarray], trace_clearance: float,
         ti, si, a1, b1 = segs[i]
         for j in range(i + 1, n):
             tj, sj, a2, b2 = segs[j]
+            d = seg_seg_dist(a1, b1, a2, b2)
             if ti == tj:
                 if abs(si - sj) <= 1:
                     continue
-                d = seg_seg_dist(a1, b1, a2, b2)
                 if d < min_self:
                     min_self = d
                 if d < self_clearance - 1e-6:
                     violations += 1
             else:
-                d = seg_seg_dist(a1, b1, a2, b2)
                 if d < min_inter:
                     min_inter = d
                 if d < trace_clearance - 1e-6:
                     violations += 1
     inf = float("inf")
-    return violations, (min_inter if math.isfinite(min_inter) else inf), \
-           (min_self if math.isfinite(min_self) else inf)
+    return (violations,
+            min_inter if math.isfinite(min_inter) else inf,
+            min_self if math.isfinite(min_self) else inf)
