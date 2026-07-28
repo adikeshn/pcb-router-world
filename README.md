@@ -1,82 +1,63 @@
-# pcb-router-world — `round-robin-v2`
+# pcb-router-world — `round-robin-v2` (v3.0 update)
 
-Round-robin trace-growth router, rebuilt on **MaskablePPO** (sb3-contrib)
-with clearance-inflated geometry, per-step mask recomputation, sampled
-length budgets, a dominance-checked reward, and a diverse top-K portfolio.
+Round-robin trace-growth PCB router on **MaskablePPO** (sb3-contrib), with
+clearance-inflated geometry, no-breakout growth straight from connector pads,
+a length-invariant reward, and a budget-stratified solution portfolio.
 
-## What changed vs `round_robin` (v1)
+## What changed in v3.0
 
-| v1 | v2 |
+### Geometry / correctness
+| Issue | Fix |
 |---|---|
-| DreamerV3 on rendered board images | MaskablePPO on a 68-dim vector obs (tips, headings, ray-casts, masks) |
-| Crossing checks on raw segments | All checks clearance-inflated (1.33 mm trace-to-trace enforced everywhere) |
-| Residual 0–1 crossings/episode (stale masks) | Masks recomputed per step; brute-force final audit; acceptance test requires **zero** violations over 200 random episodes |
-| Fixed `max_length_mm` | Budget sampled per episode (25–45 mm), in the observation and portfolio → total length is searchable again |
-| Mean pairwise tip spacing reward | **Min** pairwise hinge (mean is gameable by outliers) + dense path-clearance + edge penalties |
-| Turn order randomised per round | Randomised per episode and exposed in obs (robustness without dynamics noise) |
-| unimix floor leaks masked actions | True zero-probability masking; redirect kept only as an asserted safety net |
-| `meets_spec` label only | Still no gate/reward role, but portfolio ranks spec-passing layouts first (lexicographic) |
+| Arc-length self-exemption had a **blind spot**: the legal 3-step fold N, SE, W crosses itself, yet mask and audit both reported it clean | Exemption is now **topological adjacency** (`\|i-j\| <= 1`) — only segments that actually share an endpoint. No blind spot, robust to variable segment length |
+| Self-crowding had no gradient — a trace could coil against itself freely down to the hard 0.6 mm wall | `segment_valid` now returns the self-distance too, feeding a new dense **self-proximity penalty** |
+| Nothing penalised **turning**, so traces jittered (N, NE, N, NE…) instead of running straight | New dense **turn penalty**, scaled by turn magnitude. A wide meander costs ~4 turns; jitter costs one per step — so clean meanders become strictly cheaper than jitter for the same length-burning purpose |
 
-Kept from v1: 1 mm steps, 8 directions, equal length by construction,
-two-phase length-normalised breakout (now with lane jogs so top-row
-descents can't hit bottom-row pins), boxed-in early termination,
-ForcedExplorer (now portfolio-seeding only), file-path W&B images.
+`self_clearance_mm` **must be < `step_mm`** and this is now validated. Raising it
+to force wider meanders (as originally suggested) is impossible: with adjacency
+exemption, two segments separated by one intervening 1 mm segment sit exactly
+1 mm apart *even on a perfectly straight run*, so any value ≥ 1 mm would make
+straight-line growth illegal. Meander width is shaped by the soft penalty instead.
+
+### Reward
+| Issue | Fix |
+|---|---|
+| Dense reward scaled with episode length while terminal stayed fixed. At 110 mm budgets with γ=0.998 the dense term was worth **81 %** of the terminal — nearly inverted | Every dense term is now a per-episode **TOTAL**, divided at reset by that episode's round/step count. Balance is invariant to budget |
+| γ=0.998 gives a 500-step planning horizon for 1100-step episodes | γ=**0.999** (1000-step horizon, matched to episode length) |
+| Terminal saturated at exactly 10.0: `spacing_target_mm=16` pinned `q_spacing=1.0` for every board, so the portfolio couldn't rank and the policy got no terminal gradient | Terminal targets separated from dense ones and raised: spacing 35 mm, clearance 8 mm |
+| `q_short` was worth 0.5 reward points against a top-5 spread of 0.08 — it silently decided the entire ranking, collapsing every entry to the minimum budget | **Removed from the reward.** Length is handled structurally by portfolio stratification |
+| Nothing stopped endpoints landing on the board edge | New `q_endpoint_edge` terminal term (target 15 mm) |
+
+### Portfolio
+- **Budget-stratified by default**: `[budget_min, budget_max]` split into
+  `portfolio_k` bands, best gated layout kept per band. Surfaces the
+  length-vs-quality trade-off directly instead of a reward term deciding it.
+- Set `portfolio_stratify_by_budget=False` for the original endpoint-diversity filter.
+- ForcedExplorer now sweeps budgets across all bands so every band gets pressure.
+
+### Validation & logging
+- New `self_crossing_check`: the tight fold must be caught; straight runs and
+  90° corners must stay legal (guards against over-correction).
+- `reward_scale_check` is **discount-aware** and runs at both ends of the budget
+  range — the old raw-sum version passed the broken configuration.
+- New metrics: `train/budget_mm_all` vs `train/budget_mm_gated` (are long budgets
+  failing the gate or just losing the ranking?), `eval_by_budget/*` per-budget
+  breakdown, `train/q_spacing|q_clear|q_edge` saturation watch,
+  `train/min_self_gap_mm`, `train/turn_rate`, `portfolio/band*_terminal`.
 
 ## Layout
-
 ```
-pcb_router_rr2/
-  config.py     every tunable in one dataclass (YAML round-trip)
-  geometry.py   seg/seg distances, spatial hash, ClearanceChecker, audit
-  board.py      board / connector / pins / obstacles
-  breakout.py   deterministic breakout + validation at construction
-  env.py        gymnasium env (RoundRobinTraceEnv) + action_masks()
-  rendering.py  preview_figure / episode_figure (Agg, file-path PNGs)
-  portfolio.py  diverse top-K, lexicographic (meets_spec, terminal)
-  explorer.py   ForcedExplorer random episodes -> portfolio
-  callbacks.py  W&B scalars, board images, eval suite, explorer cadence
-  validate.py   zero_violation_check + reward_scale_check
-  train.py      MaskablePPO training entry
-configs/default_6trace.yaml   suggested 6-trace board settings
-notebooks/train_colab.ipynb   Colab driver (preview -> validate -> train)
+pcb_router_rr2/{config,geometry,board,breakout,env,rendering,portfolio,explorer,callbacks,validate,train}.py
+configs/default_10trace.yaml
+notebooks/train_colab.ipynb
 ```
 
 ## Quick start
-
 ```bash
 pip install -r requirements.txt
-
-# 1. look at the board before anything else
-python -c "from pcb_router_rr2.config import Config; \
-           from pcb_router_rr2.rendering import preview_figure; \
-           preview_figure(Config(), save_path='preview.png')"
-
-# 2. acceptance tests (must pass before training)
-python -m pcb_router_rr2.validate
-
-# 3. train
-python -m pcb_router_rr2.train --config configs/default_6trace.yaml
+python -m pcb_router_rr2.validate                      # must pass before training
+python -m pcb_router_rr2.train --config configs/default_10trace.yaml
 ```
 
-Outputs land in `runs/<run_name>/`: `config.yaml`, `model_final.zip`,
-`renders/`, and `portfolio/` (`rank_*.png`, `rank_*.json`, `portfolio.json`).
-
-## W&B metrics
-
-- `train/*` — completion, gate-pass, spec-pass, boxed-in, violation,
-  redirect rates; endpoint spacing; length spread; steps/sec
-- `reward/*` — per-term episode decomposition (spacing_dense,
-  edge_penalty, path_penalty, terminal) — watch for any term silently
-  dominating
-- `eval/*` — deterministic policy across the budget range
-- `portfolio/*` — size, gate throughput, best score, spec-pass count
-- `board/*` — images: `training_episode`, `eval_best`, `portfolio`,
-  `final_portfolio`
-
-## Notes
-
-- The v1 doc says "180 × 120 mm" but its pin coordinates need height ≥ 180;
-  this repo uses 120 (x) × 180 (y). Flip in config if your board differs.
-- `length_spread_mm` is logged and should be ~0 by construction; a nonzero
-  value indicates a breakout-normalisation regression (the safety net that
-  replaces the unported `equalize_lengths()`).
+Outputs in `runs/<name>/`: `config.yaml`, `model_final.zip`, `renders/`,
+`portfolio/` (`rank_*.png`, `rank_*.json`, `portfolio.json`).

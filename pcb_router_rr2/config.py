@@ -1,12 +1,8 @@
-"""Single source of truth for every tunable parameter.
-
-Everything the notebook exposes as a "hyperparameter" lives here, so the
-Colab config cell is just a dict of overrides applied on top of the
-defaults below.
-"""
+"""Single source of truth for every tunable parameter."""
 from __future__ import annotations
 
 import dataclasses
+import math
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
@@ -16,71 +12,61 @@ import yaml
 @dataclass
 class Config:
     # ------------------------------------------------------------------ #
-    # Board geometry (mm).  NOTE: the design doc says "180 x 120" but its
-    # pin coordinates require height >= 180, so the board is 120 wide (x)
-    # by 180 tall (y).  Adjust here if your board differs.
+    # Board geometry (mm)
     # ------------------------------------------------------------------ #
-    board_width_mm: float = 180.0
-    board_height_mm: float = 120.0
-    edge_clearance_mm: float = 2.0          # copper-to-board-edge keep-out
+    board_width_mm: float = 200.0
+    board_height_mm: float = 150.0
+    edge_clearance_mm: float = 2.0
 
     # Connector footprint rectangle (x0, y0, x1, y1) — a keep-out region.
-    # Horizontally centered, sitting in the lower region of the board
-    # (mirrors the reference layout: most routing room is above, a narrow
-    # channel below).
-    connector_rect: Tuple[float, float, float, float] = (68.0, 18.0, 112.0, 30.0)
+    connector_rect: Tuple[float, float, float, float] = (78.0, 38.0, 122.0, 50.0)
 
     # Pin start points (x, y): one representative per physical pad pair.
-    # Pins sit ON the connector footprint edge (like real pads on the
-    # connector perimeter): a pin strictly inside the footprint could not
-    # escape without its trace crossing the connector body.  Pins must
-    # also be separated by more than trace_clearance_mm, because with no
-    # breakout the very first agent segments must already respect
-    # trace-to-trace clearance.  Both rules are enforced by validate().
+    # Pins sit ON the connector footprint edge (real connector pads) and are
+    # separated beyond trace_clearance_mm, because with no breakout the very
+    # first agent segments must already respect trace-to-trace clearance.
+    # Both rules are enforced by validate().
     pins: List[Tuple[float, float]] = field(default_factory=lambda: [
-        # 7 on the top edge (y = 30)
-        (71.0, 30.0), (76.5, 30.0), (82.0, 30.0), (87.5, 30.0),
-        (93.0, 30.0), (98.5, 30.0), (104.0, 30.0),
-        # 3 on the bottom edge (y = 18)
-        (74.0, 18.0), (90.0, 18.0), (106.0, 18.0),
+        (83.5, 50.0), (89.0, 50.0), (94.5, 50.0), (100.0, 50.0),
+        (105.5, 50.0), (111.0, 50.0), (116.5, 50.0),          # 7 on top edge
+        (85.0, 38.0), (100.0, 38.0), (115.0, 38.0),           # 3 on bottom edge
     ])
 
-    # Extra rectangular keep-out obstacles [(x0, y0, x1, y1), ...]
     obstacles: List[Tuple[float, float, float, float]] = field(default_factory=list)
 
     # ------------------------------------------------------------------ #
     # Clearances (mm)
     # ------------------------------------------------------------------ #
     trace_clearance_mm: float = 1.33        # between DIFFERENT traces
-    self_clearance_mm: float = 0.60         # a trace vs its own older path
-    obstacle_clearance_mm: float = 1.00     # trace vs connector/obstacles
+    # Trace vs its OWN older path.  MUST be < step_mm: with adjacency-based
+    # exemption (see geometry) two segments separated by one intervening
+    # 1 mm segment are exactly 1 mm apart even on a perfectly straight run,
+    # so any value >= step_mm would make straight lines illegal.
+    self_clearance_mm: float = 0.60
+    obstacle_clearance_mm: float = 1.00
 
     # ------------------------------------------------------------------ #
     # Growth mechanics
     # ------------------------------------------------------------------ #
-    step_mm: float = 1.0                    # growth increment per action
+    step_mm: float = 1.0
+    budget_min_mm: float = 75.0
+    budget_max_mm: float = 110.0
+    ban_reverse: bool = True
     # No-breakout mode (default): the agent starts directly at the pins.
     # While a tip is inside a keep-out clearance halo, only moves that
-    # monotonically INCREASE distance from that keep-out (and never touch
-    # its body) are valid; once outside, full clearance applies forever.
+    # monotonically INCREASE distance from that keep-out are valid; once
+    # outside, full clearance applies permanently.
     use_breakout: bool = False
-    budget_min_mm: float = 25.0             # per-episode sampled growth budget
-    budget_max_mm: float = 45.0             #   (post-breakout, per trace)
-    self_skip_mm: float = 2.0               # own path arc-length exempt from self check
-    ban_reverse: bool = True                # forbid exact 180-degree reversal
 
     # ------------------------------------------------------------------ #
-    # Breakout
+    # Breakout (only used when use_breakout=True)
     # ------------------------------------------------------------------ #
-    breakout_lane_jog_mm: float = 1.5       # lateral jog for top-row lanes
-    breakout_clear_margin_mm: float = 3.0   # descend to this far below connector
-    breakout_fan_pitch_mm: float = 8.0      # endpoint pitch after fanning
-    breakout_fan_step_mm: float = 1.0       # vertical sub-step of the gradual fan
-    breakout_fan_safety_mm: float = 0.05    # extra clearance margin during fan
-    breakout_runout_mm: float = 4.0         # straight run-out after fan (clean hand-off)
-    # "auto": split rows to opposite sides when both sides of the connector
-    #         have >= breakout_split_min_room_mm of board; otherwise exit
-    #         toward the roomier side.  "split" / "up" / "down" force it.
+    breakout_lane_jog_mm: float = 1.5
+    breakout_clear_margin_mm: float = 3.0
+    breakout_fan_pitch_mm: float = 8.0
+    breakout_fan_step_mm: float = 1.0
+    breakout_fan_safety_mm: float = 0.05
+    breakout_runout_mm: float = 4.0
     breakout_mode: str = "auto"
     breakout_split_min_room_mm: float = 25.0
 
@@ -91,46 +77,85 @@ class Config:
     ray_max_mm: float = 20.0
 
     # ------------------------------------------------------------------ #
-    # Reward
+    # Reward — DENSE
+    # Every dense term is specified as a TOTAL budget for a whole episode
+    # and divided by the episode's round/step count at reset.  This makes
+    # the dense/terminal balance invariant to the sampled growth budget;
+    # previously dense scaled with episode length while terminal did not,
+    # which inverted the objective at long budgets.
     # ------------------------------------------------------------------ #
-    # Dense terms (deliberately small; terminal must dominate — see
-    # validate.reward_scale_check).
-    w_spacing_dense: float = 0.02           # per-round hinge on MIN pairwise tip dist
-    spacing_target_mm: float = 16.0         # hinge saturates here (spec 13 + margin)
-    w_edge_penalty: float = 0.003           # per-step, tip too close to board edge
-    edge_soft_mm: float = 8.0
-    w_path_penalty: float = 0.003           # per-step, new segment close to other traces
+    spacing_dense_total: float = 0.80       # max total spacing reward / episode
+    dense_spacing_target_mm: float = 16.0   # hinge saturation for the DENSE term
+    path_penalty_total: float = 0.25        # max total other-trace crowding penalty
     path_soft_mm: float = 4.0
+    self_penalty_total: float = 0.25        # max total SELF-crowding penalty
+    self_soft_mm: float = 4.0
+    turn_penalty_total: float = 0.30        # max total turning penalty
+    edge_penalty_total: float = 0.20        # max total edge-proximity penalty
+    edge_soft_mm: float = 8.0
 
-    # Terminal terms (gated on full completion + zero violations).
-    w_terminal_base: float = 5.0            # flat completion bonus
-    w_terminal_quality: float = 5.0         # scales the quality blend below
-    q_endpoint_spacing: float = 0.6         # blend: final min endpoint spacing
-    q_path_clearance: float = 0.3           # blend: mean path clearance margin
-    q_short_budget: float = 0.1             # blend: mild preference for short budgets
+    # ------------------------------------------------------------------ #
+    # Reward — TERMINAL (gated on completion + zero violations)
+    #
+    #   terminal = w_terminal_base                       (flat, for finishing)
+    #            + spacing_reward_per_mm * min_endpoint_spacing_mm   (UNCAPPED)
+    #            + w_path_clearance_bonus * capped_clearance_quality
+    #            + w_endpoint_edge_bonus  * capped_edge_quality
+    #
+    # Endpoint spacing is UNCAPPED and LINEAR: it is a MINIMUM over endpoint
+    # pairs, so every extra millimetre corresponds to a real improvement in
+    # the worst pair, and it is the quantity the project actually optimises.
+    # A cap here previously pinned q_spacing at 1.0 for every board, which
+    # both froze the portfolio ranking and removed the policy's gradient.
+    #
+    # The other two stay CAPPED, deliberately:
+    #  * path clearance is a clipped MEAN over per-step samples. The clip is
+    #    what makes it measure crowding rather than spread -- uncapped, the
+    #    mean is dominated by traces in open board space and a wandering
+    #    trace can outscore a tidily spaced layout. Cap raised 8 -> 14 mm
+    #    because clearance does keep genuinely improving past 8 mm.
+    #  * endpoint edge distance is a constraint: past probe-access range,
+    #    further is worth nothing, and rewarding it would pull endpoints
+    #    inward, fighting directly against endpoint spacing.
+    # ------------------------------------------------------------------ #
+    w_terminal_base: float = 5.0
+    spacing_reward_per_mm: float = 0.30     # UNCAPPED linear, reward pts per mm
+    w_path_clearance_bonus: float = 1.50    # max pts from path clearance
+    w_endpoint_edge_bonus: float = 1.00     # max pts from endpoint edge standoff
+    terminal_clearance_target_mm: float = 14.0
+    terminal_edge_target_mm: float = 15.0
 
-    # Fixture spec (LABEL + ranking tier only — never a gate or reward term)
-    endpoint_spec_mm: float = 13.0
+    endpoint_spec_mm: float = 13.0          # LABEL + ranking tier only
 
     # ------------------------------------------------------------------ #
     # Portfolio
     # ------------------------------------------------------------------ #
-    portfolio_k: int = 5
+    # [budget_min, budget_max] is split into portfolio_bands equal bands and
+    # each band holds up to portfolio_per_band layouts (total =
+    # bands x per_band).  Stratification gives variety ACROSS length; the
+    # diversity filter below gives variety ACROSS shape WITHIN each band --
+    # without it a band's slots fill with near-identical layouts.
+    portfolio_bands: int = 5
+    portfolio_per_band: int = 5
+    portfolio_stratify_by_budget: bool = True
     min_moved_frac: float = 0.5             # >= this frac of endpoints must move...
-    min_point_shift_mm: float = 13.0        # ...by at least this much vs every entry
+    min_point_shift_mm: float = 13.0        # ...by >= this vs every entry in the band
     portfolio_dir: str = "portfolio"
 
     # ------------------------------------------------------------------ #
     # Training / PPO
     # ------------------------------------------------------------------ #
-    total_timesteps: int = 2_000_000
+    total_timesteps: int = 4_000_000
     n_envs: int = 8
     seed: int = 0
     learning_rate: float = 3e-4
-    n_steps: int = 512                      # per env per rollout
+    n_steps: int = 512
     batch_size: int = 512
     n_epochs: int = 6
-    gamma: float = 0.995
+    # Effective planning horizon 1/(1-gamma) must cover the episode length
+    # (n_traces x budget).  At 10 traces x 110 mm = 1100 steps, gamma=0.999
+    # gives a 1000-step horizon; 0.995 would give only 200.
+    gamma: float = 0.999
     gae_lambda: float = 0.95
     ent_coef: float = 0.01
     clip_range: float = 0.2
@@ -141,21 +166,19 @@ class Config:
     # ------------------------------------------------------------------ #
     # Exploration / eval / logging
     # ------------------------------------------------------------------ #
-    explorer_every_episodes: int = 200      # run ForcedExplorer every N train episodes
-    explorer_episodes: int = 5              # random episodes per burst
-    explorer_momentum: float = 0.95         # persistent-walk repeat probability
-    eval_every_steps: int = 100_000         # deterministic eval suite cadence
+    explorer_every_episodes: int = 200
+    explorer_episodes: int = 5
+    explorer_momentum: float = 0.95
+    eval_every_steps: int = 100_000
     eval_episodes: int = 8
-    render_every_episodes: int = 250        # log a rendered training board every N eps
-    log_every_episodes: int = 10            # scalar episode metrics cadence
+    render_every_episodes: int = 250
+    log_every_episodes: int = 10
 
     wandb_project: str = "pcb-routing"
     wandb_run_name: Optional[str] = None
-    wandb_mode: str = "online"              # "online" | "offline" | "disabled"
+    wandb_mode: str = "online"
     out_dir: str = "runs"
 
-    # ------------------------------------------------------------------ #
-    # Derived helpers
     # ------------------------------------------------------------------ #
     @property
     def n_traces(self) -> int:
@@ -165,12 +188,8 @@ class Config:
     def board_diag_mm(self) -> float:
         return float((self.board_width_mm ** 2 + self.board_height_mm ** 2) ** 0.5)
 
-    # ------------------------------------------------------------------ #
-    # (De)serialisation
-    # ------------------------------------------------------------------ #
     def to_dict(self) -> dict:
-        d = dataclasses.asdict(self)
-        return d
+        return dataclasses.asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict) -> "Config":
@@ -197,7 +216,6 @@ class Config:
             yaml.safe_dump(self.to_dict(), f, sort_keys=False)
 
     def override(self, **kwargs) -> "Config":
-        """Return a copy with the given fields replaced."""
         d = self.to_dict()
         for k, v in kwargs.items():
             if k not in d:
@@ -209,26 +227,24 @@ class Config:
         assert self.budget_min_mm <= self.budget_max_mm
         assert self.step_mm > 0
         assert self.n_traces >= 2, "need at least two traces"
+        assert self.self_clearance_mm < self.step_mm, (
+            f"self_clearance_mm ({self.self_clearance_mm}) must be < step_mm "
+            f"({self.step_mm}): with adjacency-based self exemption, two "
+            f"segments separated by one intervening segment sit exactly "
+            f"step_mm apart even on a straight run, so a larger value would "
+            f"make straight-line growth illegal")
         w, h = self.board_width_mm, self.board_height_mm
         for i, (x, y) in enumerate(self.pins):
             assert 0 < x < w and 0 < y <= h, f"pin {i} ({x},{y}) outside board"
         x0, y0, x1, y1 = self.connector_rect
         assert x0 < x1 and y0 < y1, "connector_rect must be (x0,y0,x1,y1)"
-        # Pins must be separated beyond trace clearance: with no breakout,
-        # the first agent segments grow directly from the pins and must
-        # already satisfy trace-to-trace clearance against neighbours.
-        import math as _math
         for i in range(len(self.pins)):
             for j in range(i + 1, len(self.pins)):
-                d = _math.dist(self.pins[i], self.pins[j])
+                d = math.dist(self.pins[i], self.pins[j])
                 assert d > self.trace_clearance_mm, (
                     f"pins {i} and {j} are {d:.2f} mm apart, which is not "
                     f"beyond trace_clearance_mm={self.trace_clearance_mm}; "
                     f"widen the pin pitch (each pin represents its pad pair)")
-        # No pin may sit strictly INSIDE the connector footprint: a trace
-        # from an interior pin must cross the connector body to escape,
-        # which is forbidden.  Pins belong on the footprint edge (real
-        # connector pads) or outside it entirely.
         eps = 1e-6
         for i, (x, y) in enumerate(self.pins):
             inside = (x0 + eps < x < x1 - eps) and (y0 + eps < y < y1 - eps)
@@ -236,3 +252,7 @@ class Config:
                 f"pin {i} ({x},{y}) is strictly inside the connector "
                 f"footprint {self.connector_rect}; place pins on the "
                 f"connector edge so traces can escape without crossing it")
+        assert self.portfolio_bands >= 1 and self.portfolio_per_band >= 1
+        assert self.spacing_reward_per_mm > 0, (
+            "spacing_reward_per_mm is the uncapped linear reward rate for "
+            "endpoint spacing and must be positive")

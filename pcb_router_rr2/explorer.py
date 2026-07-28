@@ -1,24 +1,17 @@
-"""ForcedExplorer: full episodes under a masked-random policy.
+"""ForcedExplorer: full episodes under masked-random walk profiles.
 
-Purpose in v2 is narrower than in v1: PPO is on-policy so these episodes
-never enter training — they exist purely to keep seeding the diversity
-portfolio with layouts outside the current policy's basin (the one job
-ForcedExplorer was demonstrably good at).
+PPO is on-policy so these episodes never enter training -- they exist purely
+to keep seeding the portfolio with layouts outside the current policy's basin.
 
-The walk mixes three ingredients, rotated per episode, because they trade
-off differently (measured on the 10-trace no-breakout board):
-* PERSISTENT (repeat previous direction w.p. `momentum`): completes most
-  episodes (~17% at 0.95 vs 0% uniform) but spreads tips only moderately.
-* SPREAD-SEEKING (w.p. `spread_bias`, pick the valid direction that most
-  increases distance from the nearest other tip): completes fewer but
-  reaches near-spec endpoint spacing when it does.  Too much of it traps
-  traces against edges (0% completion at bias 0.4), hence the mix.
-* UNIFORM: worst completion, kept as a small slice for layout diversity.
+The walk rotates three profiles because they trade off differently (measured
+on the 10-trace no-breakout board): PERSISTENT (repeat previous direction
+w.p. momentum) completes most episodes; SPREAD-SEEKING (step away from the
+nearest other tip) completes fewer but reaches near-spec endpoint spacing;
+UNIFORM completes worst but adds layout diversity.
 """
-
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import numpy as np
 
@@ -27,11 +20,9 @@ from .env import RoundRobinTraceEnv
 from .portfolio import Portfolio
 
 
-def run_random_episode(env: RoundRobinTraceEnv,
-                       rng: np.random.Generator,
+def run_random_episode(env: RoundRobinTraceEnv, rng: np.random.Generator,
                        budget_mm: Optional[float] = None,
-                       momentum: float = 0.0,
-                       spread_bias: float = 0.0) -> Dict:
+                       momentum: float = 0.0, spread_bias: float = 0.0) -> Dict:
     from .env import DIRS
     options = {"budget_mm": budget_mm} if budget_mm is not None else None
     env.reset(options=options)
@@ -48,15 +39,12 @@ def run_random_episode(env: RoundRobinTraceEnv,
             if prev >= 0 and mask[prev] and r < momentum:
                 action = prev
             elif r < momentum + spread_bias:
-                # spread-seeking: valid direction that most increases the
-                # distance from the nearest other tip
                 tips = np.asarray([p[-1] for p in env.paths])
                 tip = tips[tid]
                 others = np.delete(tips, tid, axis=0)
                 best_a, best_d = int(valid[0]), -1.0
                 for k in valid:
-                    q = tip + DIRS[k]
-                    d = float(np.min(np.linalg.norm(others - q, axis=1)))
+                    d = float(np.min(np.linalg.norm(others - (tip + DIRS[k]), axis=1)))
                     if d > best_d:
                         best_d, best_a = d, int(k)
                 action = best_a
@@ -78,23 +66,22 @@ class ForcedExplorer:
 
     def run_burst(self, n_episodes: Optional[int] = None) -> Dict[str, float]:
         n = n_episodes or self.cfg.explorer_episodes
-        added = 0
-        completes = 0
-        # rotation of walk profiles: (momentum, spread_bias)
-        profiles = [(self.cfg.explorer_momentum, 0.0),
-                    (0.7, 0.25),
-                    (self.cfg.explorer_momentum, 0.0),
-                    (0.0, 0.0)]
+        profiles = [(self.cfg.explorer_momentum, 0.0), (0.7, 0.25),
+                    (self.cfg.explorer_momentum, 0.0), (0.0, 0.0)]
+        added = completes = 0
         for k in range(n):
             momentum, spread = profiles[k % len(profiles)]
-            ed = run_random_episode(self.env, self.rng,
+            # sample budgets across the full range so every portfolio band
+            # gets exploration pressure, not just the short end
+            lo, hi = self.cfg.budget_min_mm, self.cfg.budget_max_mm
+            nb = self.cfg.portfolio_bands
+            budget = lo + (hi - lo) * ((k % nb) + 0.5) / nb
+            ed = run_random_episode(self.env, self.rng, budget_mm=budget,
                                     momentum=momentum, spread_bias=spread)
             self.total_episodes += 1
             completes += int(ed["complete"])
             if self.portfolio.consider(ed):
                 added += 1
-        return {
-            "explorer/episodes_total": float(self.total_episodes),
-            "explorer/burst_complete_rate": completes / max(n, 1),
-            "explorer/burst_portfolio_adds": float(added),
-        }
+        return {"explorer/episodes_total": float(self.total_episodes),
+                "explorer/burst_complete_rate": completes / max(n, 1),
+                "explorer/burst_portfolio_adds": float(added)}

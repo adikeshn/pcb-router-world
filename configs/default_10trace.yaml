@@ -1,80 +1,90 @@
-# Suggested configuration: 6-trace, 3-stacked-on-3 TE test board.
-# Every key maps 1:1 to pcb_router_rr2.config.Config.
-
-board_width_mm: 180.0
-board_height_mm: 120.0
+board_width_mm: 200.0
+board_height_mm: 150.0
 edge_clearance_mm: 2.0
-connector_rect: [68.0, 18.0, 112.0, 30.0]
+connector_rect:
+- 78.0
+- 38.0
+- 122.0
+- 50.0
 pins:
-  - [71.0, 30.0]
-  - [76.5, 30.0]
-  - [82.0, 30.0]
-  - [87.5, 30.0]
-  - [93.0, 30.0]
-  - [98.5, 30.0]
-  - [104.0, 30.0]
-  - [74.0, 18.0]
-  - [90.0, 18.0]
-  - [106.0, 18.0]
+- - 83.5
+  - 50.0
+- - 89.0
+  - 50.0
+- - 94.5
+  - 50.0
+- - 100.0
+  - 50.0
+- - 105.5
+  - 50.0
+- - 111.0
+  - 50.0
+- - 116.5
+  - 50.0
+- - 85.0
+  - 38.0
+- - 100.0
+  - 38.0
+- - 115.0
+  - 38.0
 obstacles: []
-
 trace_clearance_mm: 1.33
-self_clearance_mm: 0.60
-obstacle_clearance_mm: 1.00
-
+self_clearance_mm: 0.6
+obstacle_clearance_mm: 1.0
 step_mm: 1.0
-use_breakout: false
-budget_min_mm: 25.0
-budget_max_mm: 45.0
-self_skip_mm: 2.0
+budget_min_mm: 75.0
+budget_max_mm: 110.0
 ban_reverse: true
-
+use_breakout: false
 breakout_lane_jog_mm: 1.5
 breakout_clear_margin_mm: 3.0
 breakout_fan_pitch_mm: 8.0
 breakout_fan_step_mm: 1.0
-use_breakout: false
 breakout_fan_safety_mm: 0.05
 breakout_runout_mm: 4.0
 breakout_mode: auto
 breakout_split_min_room_mm: 25.0
-
 n_rays: 16
 ray_max_mm: 20.0
-
-w_spacing_dense: 0.02
-spacing_target_mm: 16.0
-w_edge_penalty: 0.003
-edge_soft_mm: 8.0
-w_path_penalty: 0.003
+spacing_dense_total: 0.8
+dense_spacing_target_mm: 16.0
+path_penalty_total: 0.25
 path_soft_mm: 4.0
+self_penalty_total: 0.25
+self_soft_mm: 4.0
+turn_penalty_total: 0.3
+edge_penalty_total: 0.2
+edge_soft_mm: 8.0
 w_terminal_base: 5.0
 w_terminal_quality: 5.0
+terminal_spacing_target_mm: 35.0
+terminal_clearance_target_mm: 8.0
+terminal_edge_target_mm: 15.0
 q_endpoint_spacing: 0.6
-q_path_clearance: 0.3
-q_short_budget: 0.1
+q_path_clearance: 0.25
+q_endpoint_edge: 0.15
 endpoint_spec_mm: 13.0
-
 portfolio_k: 5
+portfolio_stratify_by_budget: true
 min_moved_frac: 0.5
 min_point_shift_mm: 13.0
 portfolio_dir: portfolio
-
-total_timesteps: 2000000
+total_timesteps: 4000000
 n_envs: 8
 seed: 0
 learning_rate: 0.0003
 n_steps: 512
 batch_size: 512
 n_epochs: 6
-gamma: 0.995
+gamma: 0.999
 gae_lambda: 0.95
 ent_coef: 0.01
 clip_range: 0.2
 max_grad_norm: 0.5
-net_arch: [256, 256]
+net_arch:
+- 256
+- 256
 device: auto
-
 explorer_every_episodes: 200
 explorer_episodes: 5
 explorer_momentum: 0.95
@@ -82,7 +92,6 @@ eval_every_steps: 100000
 eval_episodes: 8
 render_every_episodes: 250
 log_every_episodes: 10
-
 wandb_project: pcb-routing
 wandb_run_name: null
 wandb_mode: online
