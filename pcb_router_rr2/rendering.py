@@ -119,9 +119,12 @@ def episode_subtitle(cfg: Config, ed: dict) -> str:
             f"{ed['min_endpoint_spacing_mm']:.1f} mm | spec "
             f"{'PASS' if ed['meets_spec'] else 'miss'} | violations {ed['violations']}"
             f"{trunc}\n"
-            f"min self-gap {ed['min_self_distance_mm']:.2f} mm | turn rate "
-            f"{ed['turn_rate']:.2f} | min freedom {ed['min_freedom']} | "
-            f"survived {ed['frac_survived']:.0%} | length spread "
+            f"clearance mean {ed['mean_path_clearance_mm']:.1f} / p5 "
+            f"{ed['p5_path_clearance_mm']:.1f} mm | reversal "
+            f"{ed['turn_reversal_rate']:.2f} | min self-gap "
+            f"{ed['min_self_distance_mm']:.2f} mm | min freedom {ed['min_freedom']}\n"
+            f"survived {ed['frac_survived']:.0%} | turn-limit relaxations "
+            f"{ed['turn_limit_relaxations']} | length spread "
             f"{ed['length_spread_mm']:.2f} mm | terminal {ed['reward_terminal']:.2f}")
 
 

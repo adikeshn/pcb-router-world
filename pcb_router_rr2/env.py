@@ -107,7 +107,7 @@ class RoundRobinTraceEnv(gym.Env):
         self.w_constrict = cfg.constriction_penalty_total / self.budget_rounds
         self.w_path = cfg.path_penalty_total / self.total_steps
         self.w_self = cfg.self_penalty_total / self.total_steps
-        self.w_turn = cfg.turn_penalty_total / self.total_steps
+        self.w_reversal = cfg.reversal_penalty_total / self.total_steps
         self.w_edge = cfg.edge_penalty_total / self.total_steps
 
         self.order = self.rng.permutation(self.n)
@@ -117,6 +117,11 @@ class RoundRobinTraceEnv(gym.Env):
         self.boxed_in = False
         self.boxed_trace = -1
         self.turn_units_total = 0
+        self.turn_reversals = 0
+        self.turn_opportunities = 0
+        self.turn_limit_relaxations = 0
+        self.last_turn_sign = np.zeros(self.n, dtype=np.int64)
+        self.straight_run = np.zeros(self.n, dtype=np.int64)
 
         self._clearance_samples: List[float] = []
         self._self_samples: List[float] = []
@@ -124,7 +129,8 @@ class RoundRobinTraceEnv(gym.Env):
         self._min_freedom_seen = self.nd
         self._terms = {"spacing_dense": 0.0, "constriction": 0.0,
                        "path_penalty": 0.0, "self_penalty": 0.0,
-                       "turn_penalty": 0.0, "edge_penalty": 0.0, "terminal": 0.0}
+                       "reversal_penalty": 0.0, "edge_penalty": 0.0,
+                       "terminal": 0.0}
         # cached per-trace masks for the freedom observation (<=n-1 steps stale)
         self._cached_masks = np.ones((self.n, self.nd), dtype=bool)
         for tid in range(self.n):
@@ -136,7 +142,8 @@ class RoundRobinTraceEnv(gym.Env):
     def _active(self) -> int:
         return int(self.order[self.ptr])
 
-    def _compute_mask(self, tid: int) -> np.ndarray:
+    def _geometric_mask(self, tid: int) -> np.ndarray:
+        """Which directions are geometrically legal, ignoring the turn limit."""
         tip = self.paths[tid][-1]
         mask = np.zeros(self.nd, dtype=bool)
         step = self.cfg.step_mm
@@ -149,6 +156,34 @@ class RoundRobinTraceEnv(gym.Env):
             ok, _, _ = self.checker.segment_valid(tid, (tip[0], tip[1]), b)
             mask[k] = ok
         return mask
+
+    def _turn_window(self, tid: int) -> np.ndarray:
+        """Directions within max_turn_units of the current heading.  All
+        directions when the trace has no heading yet (still on its pin)."""
+        prev = int(self.last_dir_idx[tid])
+        if prev < 0:
+            return np.ones(self.nd, dtype=bool)
+        w = np.zeros(self.nd, dtype=bool)
+        for k in range(self.nd):
+            if turn_units(prev, k, self.nd) <= self.cfg.max_turn_units:
+                w[k] = True
+        return w
+
+    def _compute_mask(self, tid: int) -> np.ndarray:
+        """Geometric legality AND the hard turn limit.
+
+        ESCAPE VALVE: if the turn limit leaves nothing legal, it is lifted for
+        this step and the full geometric mask is used.  Without this the turn
+        limit would CAUSE boxing in rather than shaping routing."""
+        geo = self._geometric_mask(tid)
+        if self.cfg.max_turn_units >= self.nd // 2:
+            return geo
+        limited = geo & self._turn_window(tid)
+        if limited.any():
+            return limited
+        if geo.any():
+            self.turn_limit_relaxations += 1
+        return geo
 
     def action_masks(self) -> np.ndarray:
         """Fresh every step for the active trace; never cached across steps."""
@@ -208,15 +243,37 @@ class RoundRobinTraceEnv(gym.Env):
             min(d_self_far, cfg.self_soft_mm * 2)
             if math.isfinite(d_self_far) else cfg.self_soft_mm * 2)
 
-        # --- turning, with a FREE BAND for quantisation ------------------ #
+        # --- REVERSAL penalty: flipping turn direction, not turning ------ #
+        # A smooth arc keeps a consistent turn sign; jitter alternates. Mean
+        # turn magnitude cannot tell them apart, so sign is what is charged.
         if prev_dir >= 0:
             t = turn_units(int(prev_dir), action, self.nd)
             self.turn_units_total += t
-            charged = max(0, t - cfg.turn_free_units)
-            if charged > 0:
-                denom = max(1, self.nd // 2 - cfg.turn_free_units)
-                pen = self.w_turn * (charged / denom)
-                reward -= pen; self._terms["turn_penalty"] -= pen
+            # signed turn: +1 clockwise, -1 counter-clockwise, 0 straight
+            if t == 0:
+                sign = 0
+            else:
+                fwd = (action - int(prev_dir)) % self.nd
+                sign = 1 if fwd <= self.nd // 2 else -1
+            prev_sign = int(self.last_turn_sign[tid])
+            if sign != 0 and prev_sign != 0:
+                self.turn_opportunities += 1
+                if sign * prev_sign < 0:
+                    self.turn_reversals += 1
+                    pen = self.w_reversal
+                    reward -= pen; self._terms["reversal_penalty"] -= pen
+            # Only NEAR-immediate alternation is jitter.  A straight run longer
+            # than reversal_memory_steps clears the remembered sign, so two
+            # legitimate opposite corners separated by a straight stretch are
+            # not charged -- while a single straight step inserted between
+            # alternating turns cannot dodge the penalty.
+            if sign != 0:
+                self.last_turn_sign[tid] = sign
+                self.straight_run[tid] = 0
+            else:
+                self.straight_run[tid] += 1
+                if self.straight_run[tid] > cfg.reversal_memory_steps:
+                    self.last_turn_sign[tid] = 0
 
         # --- edge proximity (weight 0 by default) ----------------------- #
         if self.w_edge > 0:
@@ -274,19 +331,32 @@ class RoundRobinTraceEnv(gym.Env):
         meets_spec = bool(min_ep >= cfg.endpoint_spec_mm)
         min_ep_edge = float(min(self._edge_distance(p) for p in endpoints))
 
-        mean_clr = float(np.mean(self._clearance_samples)) if self._clearance_samples \
-            else cfg.terminal_clearance_target_mm
+        T = cfg.terminal_clearance_target_mm
+        if self._clearance_samples:
+            mean_clr = float(np.mean(self._clearance_samples))
+            p5_clr = float(np.percentile(self._clearance_samples, cfg.clearance_tail_pct))
+        else:
+            mean_clr = p5_clr = T
         mean_self = float(np.mean(self._self_samples)) if self._self_samples else -1.0
+        reversal_rate = (self.turn_reversals / self.turn_opportunities
+                         if self.turn_opportunities else 0.0)
 
         terminal = 0.0
         gate = complete and violations == 0
-        r_spacing = q_clear = q_edge = 0.0
+        r_spacing = q_clear = q_clear_mean = q_clear_tail = q_smooth = q_edge = 0.0
         if gate:
             r_spacing = cfg.spacing_reward_coeff * math.sqrt(max(min_ep, 0.0))
-            q_clear = min(mean_clr, cfg.terminal_clearance_target_mm) / cfg.terminal_clearance_target_mm
+            # clearance: half bulk (mean dilutes localised crowding), half tail
+            # (a percentile alone is blind below its threshold)
+            q_clear_mean = min(mean_clr, T) / T
+            q_clear_tail = min(p5_clr, T) / T
+            q_clear = 0.5 * q_clear_mean + 0.5 * q_clear_tail
+            # smoothness: jitter cannot be masked away, so it must be scored
+            q_smooth = 1.0 - min(max(reversal_rate, 0.0), 1.0)
             q_edge = min(min_ep_edge, cfg.terminal_edge_target_mm) / cfg.terminal_edge_target_mm
             terminal = (cfg.w_terminal_base + r_spacing
                         + cfg.w_path_clearance_bonus * q_clear
+                        + cfg.w_smoothness_bonus * q_smooth
                         + cfg.w_endpoint_edge_bonus * q_edge)
         self._terms["terminal"] = terminal
 
@@ -312,6 +382,9 @@ class RoundRobinTraceEnv(gym.Env):
             "min_inter_trace_mm": float(min_inter) if math.isfinite(min_inter) else -1.0,
             "min_self_distance_mm": float(min_self) if math.isfinite(min_self) else -1.0,
             "mean_path_clearance_mm": mean_clr,
+            "p5_path_clearance_mm": p5_clr,
+            "turn_reversal_rate": reversal_rate,
+            "turn_limit_relaxations": int(self.turn_limit_relaxations),
             "mean_self_far_mm": mean_self,
             "min_freedom": int(self._min_freedom_seen),
             "mean_freedom": float(np.mean(self._freedom_hist)) if self._freedom_hist else float(self.nd),
@@ -320,7 +393,8 @@ class RoundRobinTraceEnv(gym.Env):
             "length_spread_mm": float(max(lengths) - min(lengths)),
             "reward_terminal": float(terminal),
             "r_spacing": float(r_spacing), "q_clear": float(q_clear),
-            "q_edge": float(q_edge),
+            "q_clear_mean": float(q_clear_mean), "q_clear_tail": float(q_clear_tail),
+            "q_smooth": float(q_smooth), "q_edge": float(q_edge),
             "reward_terms": dict(self._terms),
             "redirects": int(self.redirects),
         }}

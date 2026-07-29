@@ -14,7 +14,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 from sb3_contrib import MaskablePPO
 from sb3_contrib.common.wrappers import ActionMasker
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
 from .callbacks import RouterCallback
 from .config import Config
@@ -33,11 +33,14 @@ def make_env(cfg: Config, seed: int):
     return _thunk
 
 
-def linear_schedule(initial: float):
-    """Anneal linearly to zero. Constant LR across millions of steps is
-    destabilising late in training and contributed to a policy collapse."""
+def linear_schedule(initial: float, floor: float):
+    """Anneal linearly from `initial` down to `floor`, not to zero.
+
+    A constant high rate is destabilising late in training, but annealing all
+    the way to zero freezes the policy into whatever basin it occupies by
+    mid-run -- counterproductive when escaping a basin is the goal."""
     def f(progress_remaining: float) -> float:
-        return progress_remaining * initial
+        return floor + progress_remaining * (initial - floor)
     return f
 
 
@@ -53,7 +56,12 @@ def train(cfg: Config, resume_model: Optional[str] = None) -> str:
                    mode=cfg.wandb_mode, dir=run_dir)
 
     portfolio = Portfolio(cfg, os.path.join(run_dir, cfg.portfolio_dir))
-    venv = DummyVecEnv([make_env(cfg, cfg.seed + i) for i in range(cfg.n_envs)])
+    # DummyVecEnv steps every env SERIALLY in one process on one core.
+    # SubprocVecEnv is the one that actually uses multiple cores; on a
+    # 12-core machine that is the difference between ~200 and ~1500 env
+    # steps/sec, and env stepping is >90% of wall clock.
+    vec_cls = SubprocVecEnv if cfg.subproc_vecenv and cfg.n_envs > 1 else DummyVecEnv
+    venv = vec_cls([make_env(cfg, cfg.seed + i) for i in range(cfg.n_envs)])
 
     try:
         import tensorboard  # noqa: F401
@@ -61,7 +69,8 @@ def train(cfg: Config, resume_model: Optional[str] = None) -> str:
     except ImportError:
         tb_dir = None
 
-    lr = linear_schedule(cfg.learning_rate) if cfg.lr_anneal else cfg.learning_rate
+    lr = (linear_schedule(cfg.learning_rate, cfg.lr_floor)
+          if cfg.lr_anneal else cfg.learning_rate)
 
     if resume_model:
         model = MaskablePPO.load(resume_model, env=venv, device=cfg.device)
@@ -79,6 +88,8 @@ def train(cfg: Config, resume_model: Optional[str] = None) -> str:
     print(f"episode = {cfg.budget_rounds} rounds x {cfg.n_traces} traces = "
           f"{cfg.episode_steps} steps | gamma {cfg.gamma} -> horizon "
           f"{1/(1-cfg.gamma):.0f} ({1/(1-cfg.gamma)/cfg.episode_steps:.1f}x episode)")
+    print(f"vec env = {vec_cls.__name__} x {cfg.n_envs} | max_turn_units "
+          f"{cfg.max_turn_units} ({2*cfg.max_turn_units+1} of {cfg.n_dirs} dirs legal)")
 
     callback = RouterCallback(cfg, portfolio, run_dir, verbose=1)
     try:
@@ -93,6 +104,18 @@ def train(cfg: Config, resume_model: Optional[str] = None) -> str:
         print("Interrupted - saving current model and portfolio.")
 
     model.save(os.path.join(run_dir, "model_final.zip"))
+
+    # Forced-prefix sweep on the finished policy: answers whether the run
+    # landed in a local optimum, and feeds any better layouts to the portfolio.
+    try:
+        from .forced_prefix import sweep
+        print()
+        sweep(cfg, model, callback.recent_episodes(), portfolio=portfolio,
+              n_traces_to_try=1, n_dirs_to_try=cfg.n_dirs, n_baseline=8,
+              seed=cfg.seed, out_dir=run_dir)
+    except Exception as exc:                      # never let this kill a run
+        print(f"[forced_prefix] skipped: {exc}")
+
     portfolio.render(force=True)
     print(f"\nmodel_final.zip saved")
     if callback.best_eval_gate >= 0:

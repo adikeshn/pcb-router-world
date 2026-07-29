@@ -97,7 +97,10 @@ class Portfolio:
                 "mean_path_clearance_mm": ed["mean_path_clearance_mm"],
                 "min_self_distance_mm": ed["min_self_distance_mm"],
                 "min_endpoint_edge_mm": ed["min_endpoint_edge_mm"],
-                "turn_rate": ed["turn_rate"], "min_freedom": ed["min_freedom"],
+                "turn_rate": ed["turn_rate"],
+                "turn_reversal_rate": ed["turn_reversal_rate"],
+                "p5_path_clearance_mm": ed["p5_path_clearance_mm"],
+                "min_freedom": ed["min_freedom"],
                 "length_spread_mm": ed["length_spread_mm"],
                 "budget_mm": ed["budget_mm"],
                 "found_at_episode": ed.get("found_at_episode"),
@@ -123,10 +126,26 @@ class Portfolio:
     def image_paths(self) -> List[str]:
         return [os.path.join(self.dir, f"rank_{i}.png") for i in range(len(self.entries))]
 
+    def diversity_mm(self) -> float:
+        """Mean endpoint displacement between portfolio entries.
+
+        The direct measure of whether the search is finding different layouts
+        or polishing one. Near min_point_shift_mm means entries only just
+        clear the diversity filter; high means real structural variety.
+        Rising best_reward_terminal with flat diversity is the signature of a
+        local optimum."""
+        if len(self.entries) < 2:
+            return 0.0
+        eps = [np.asarray(e["endpoints"]) for e in self.entries]
+        d = [float(np.mean(np.linalg.norm(eps[i] - eps[j], axis=1)))
+             for i in range(len(eps)) for j in range(i + 1, len(eps))]
+        return float(np.mean(d))
+
     def summary(self) -> Dict[str, Any]:
         with self._lock:
             best = _score(self.entries[0]) if self.entries else (0, 0.0)
             return {
+                "diversity_mm": self.diversity_mm(),
                 "size": len(self.entries), "capacity": self.k,
                 "considered": self.considered, "gate_passed": self.gate_passed,
                 "best_meets_spec": best[0], "best_reward_terminal": best[1],

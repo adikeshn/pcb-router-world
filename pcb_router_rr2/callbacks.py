@@ -16,7 +16,7 @@ from stable_baselines3.common.callbacks import BaseCallback
 
 from .config import Config
 from .env import RoundRobinTraceEnv
-from .explorer import ForcedExplorer
+from .explorer import ParameterNoiseExplorer
 from .portfolio import Portfolio
 from .rendering import episode_figure, fig_to_png_path
 
@@ -41,7 +41,9 @@ class RouterCallback(BaseCallback):
         os.makedirs(os.path.join(run_dir, "checkpoints"), exist_ok=True)
         self.episodes = 0
         self._window = deque(maxlen=100)
-        self._explorer: Optional[ForcedExplorer] = None
+        # boxed_trace + endpoints + paths, for forced-prefix targeting
+        self._recent = deque(maxlen=60)
+        self._explorer: Optional[ParameterNoiseExplorer] = None
         self._eval_env: Optional[RoundRobinTraceEnv] = None
         self._next_eval = cfg.eval_every_steps
         self._next_ckpt = cfg.checkpoint_every_steps
@@ -51,8 +53,13 @@ class RouterCallback(BaseCallback):
         self._evals_since_best = 0
 
     def _init_callback(self) -> None:
-        self._explorer = ForcedExplorer(self.cfg, self.portfolio, seed=self.cfg.seed + 777)
+        self._explorer = ParameterNoiseExplorer(self.cfg, self.portfolio,
+                                                seed=self.cfg.seed + 777)
         self._eval_env = RoundRobinTraceEnv(self.cfg, seed=self.cfg.seed + 999)
+
+    def recent_episodes(self):
+        """Light episode records for stuckness scoring (forced-prefix targets)."""
+        return list(self._recent)
 
     def _on_step(self) -> bool:
         for info in self.locals.get("infos", ()):
@@ -78,13 +85,17 @@ class RouterCallback(BaseCallback):
         cfg = self.cfg
         changed = self.portfolio.consider(ed, episode=self.episodes,
                                           steps=self.num_timesteps)
+        self._recent.append({"boxed_trace": ed["boxed_trace"],
+                             "endpoints": ed["endpoints"], "paths": ed["paths"]})
         self._window.append({k: ed[k] for k in (
             "complete", "gate_pass", "meets_spec", "violations", "boxed_in",
             "boxed_trace", "frac_survived", "min_endpoint_spacing_mm",
             "min_endpoint_edge_mm", "min_self_distance_mm", "mean_self_far_mm",
-            "mean_path_clearance_mm", "min_freedom", "mean_freedom", "turn_rate",
-            "length_spread_mm", "reward_terminal", "redirects", "r_spacing",
-            "q_clear", "q_edge")} | {"terms": ed["reward_terms"]})
+            "mean_path_clearance_mm", "p5_path_clearance_mm", "min_freedom",
+            "mean_freedom", "turn_rate", "turn_reversal_rate",
+            "turn_limit_relaxations", "length_spread_mm", "reward_terminal",
+            "redirects", "r_spacing", "q_clear", "q_clear_mean", "q_clear_tail",
+            "q_smooth", "q_edge")} | {"terms": ed["reward_terms"]})
 
         if self.episodes % cfg.log_every_episodes == 0:
             w = list(self._window)
@@ -109,6 +120,9 @@ class RouterCallback(BaseCallback):
                 "train/length_spread_mm": mean("length_spread_mm"),
                 # --- shape / geometry ---
                 "train/turn_rate": mean("turn_rate"),
+                "train/turn_reversal_rate": mean("turn_reversal_rate"),
+                "train/turn_limit_relaxations": mean("turn_limit_relaxations"),
+                "train/p5_path_clearance_mm": mean("p5_path_clearance_mm"),
                 "train/mean_self_far_mm": mean("mean_self_far_mm"),
                 "train/min_freedom": mean("min_freedom"),
                 "train/mean_freedom": mean("mean_freedom"),
@@ -116,6 +130,9 @@ class RouterCallback(BaseCallback):
                 "train/reward_terminal_mean": mean("reward_terminal"),
                 "train/r_spacing": mean("r_spacing", gated),
                 "train/q_clear": mean("q_clear", gated),
+                "train/q_clear_mean": mean("q_clear_mean", gated),
+                "train/q_clear_tail": mean("q_clear_tail", gated),
+                "train/q_smooth": mean("q_smooth", gated),
                 "train/terminal_when_gated": mean("reward_terminal", gated),
                 # --- throughput ---
                 "train/steps_per_sec": self.num_timesteps / max(time.time() - self._t0, 1e-9),
@@ -156,11 +173,43 @@ class RouterCallback(BaseCallback):
                      "portfolio/updates": self.portfolio.updates},
                     step=self.num_timesteps)
 
+        # Parameter-noise explorer, gated on competence: perturbing an
+        # incompetent policy just yields incompetent boards.
         if (self._explorer is not None
                 and self.episodes % cfg.explorer_every_episodes == 0):
-            _wb_log(self._explorer.run_burst(episode=self.episodes,
-                                             steps=self.num_timesteps),
-                    step=self.num_timesteps)
+            if self.best_eval_gate >= cfg.explorer_min_gate_pass:
+                _wb_log(self._explorer.run_burst(self.model, episode=self.episodes,
+                                                 steps=self.num_timesteps),
+                        step=self.num_timesteps)
+            else:
+                _wb_log({"explorer/skipped_low_gate": 1.0}, step=self.num_timesteps)
+
+        # Online forced-prefix burst: automatically targets the most "stuck"
+        # trace rather than a hard-coded one.
+        if (cfg.prefix_every_episodes > 0
+                and self.episodes % cfg.prefix_every_episodes == 0
+                and self.best_eval_gate >= cfg.explorer_min_gate_pass
+                and len(self._recent) >= 10):
+            try:
+                from .forced_prefix import (stuckness_scores, direction_order,
+                                            run_forced_prefix)
+                recent = list(self._recent)
+                sc = stuckness_scores(recent, cfg.n_traces, cfg.board_diag_mm)
+                t = int(np.argmax(sc))
+                dirs = direction_order(recent, t, cfg.n_dirs)
+                rounds = max(1, int(round(cfg.prefix_fractions[0] * cfg.budget_rounds)))
+                adds = 0
+                for d in dirs[:cfg.prefix_episodes_per_burst]:
+                    ed2 = run_forced_prefix(self.model, self._eval_env, t, d, rounds)
+                    if self.portfolio.consider(ed2, episode=self.episodes,
+                                               steps=self.num_timesteps):
+                        adds += 1
+                _wb_log({"prefix/target_trace": float(t),
+                         "prefix/target_stuckness": float(sc[t]),
+                         "prefix/portfolio_adds": float(adds)},
+                        step=self.num_timesteps)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------ #
     def _run_eval(self) -> bool:

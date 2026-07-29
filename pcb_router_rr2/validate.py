@@ -101,25 +101,78 @@ def self_penalty_check(cfg: Config, verbose: bool = True) -> Dict:
     return {"rows": rows, "passed": ok}
 
 
-def turn_penalty_check(cfg: Config, verbose: bool = True) -> Dict:
-    """Alternating between ADJACENT directions is how a discrete grid
-    approximates an intermediate heading. It must be free, or the penalty
-    taxes a quantisation artifact rather than real turning."""
-    nd = cfg.n_dirs
-    quant = turn_units(0, 1, nd)                 # adjacent alternation
-    real = turn_units(0, nd // 4, nd)            # a real 90-degree turn
-    free = cfg.turn_free_units
-    res = {"quantisation_units": quant, "real_turn_units": real,
-           "quantisation_charged": max(0, quant - free),
-           "real_turn_charged": max(0, real - free),
-           "passed": quant <= free < real}
+def turn_limit_check(cfg: Config, verbose: bool = True) -> Dict:
+    """The hard turn limit must make a single-step 90-degree corner impossible
+    while leaving a single-step 45-degree turn legal -- i.e. corners must be
+    mitred. Also verifies the escape valve exists."""
+    nd, m = cfg.n_dirs, cfg.max_turn_units
+    u45 = nd // 8          # 45 deg in direction units
+    u90 = nd // 4          # 90 deg
+    legal_dirs = 2 * m + 1
+    res = {"legal_dirs": legal_dirs, "u45": u45, "u90": u90,
+           "45_in_one_step": u45 <= m, "90_in_one_step": u90 <= m,
+           "passed": (u45 <= m) and (u90 > m)}
     if verbose:
-        print(f"[turn_penalty_check] {nd} directions, free band {free} unit(s)")
-        print(f"  adjacent alternation ({quant} unit): charged "
-              f"{res['quantisation_charged']} ({'PASS - free' if res['quantisation_charged'] == 0 else 'FAIL'})")
-        print(f"  real 90-deg turn ({real} units): charged "
-              f"{res['real_turn_charged']} ({'PASS - costly' if res['real_turn_charged'] > 0 else 'FAIL'})")
+        print(f"[turn_limit_check] {nd} directions, max_turn_units={m}")
+        print(f"  legal directions per step     : {legal_dirs} of {nd}")
+        print(f"  45 deg in one step (want YES) : {res['45_in_one_step']} "
+              f"({'PASS' if res['45_in_one_step'] else 'FAIL - over-constrained'})")
+        print(f"  90 deg in one step (want NO)  : {res['90_in_one_step']} "
+              f"({'PASS - mitred' if not res['90_in_one_step'] else 'FAIL - sharp corners possible'})")
     return res
+
+
+def reversal_check(cfg: Config, verbose: bool = True) -> Dict:
+    """The reversal penalty must be SILENT on every desirable shape and FIRE on
+    jitter. Mean turn magnitude cannot do this: it scores a smooth arc and pure
+    jitter identically, and ranks long-straights-with-sharp-corners as best."""
+    nd = cfg.n_dirs
+
+    def rates(turns, memory=cfg.reversal_memory_steps):
+        mag = float(np.mean([abs(t) for t in turns]))
+        opp = rev = 0
+        prev = 0
+        run = 0
+        for t in turns:
+            sign = 0 if t == 0 else (1 if t > 0 else -1)
+            if sign != 0 and prev != 0:
+                opp += 1
+                if sign * prev < 0:
+                    rev += 1
+            if sign != 0:
+                prev = sign; run = 0
+            else:
+                run += 1
+                if run > memory:
+                    prev = 0
+        return mag, (rev / opp if opp else 0.0)
+
+    cases = [("straight run",      [0] * 12,                     False),
+             ("smooth arc",        [1] * 12,                     False),
+             ("tight smooth arc",  [2] * 12,                     False),
+             ("mitred 90 corner",  [0, 0, 0, 2, 2, 0, 0, 0, 0],  False),
+             ("two opposite corners (long straight between)",
+                                   [0, 0, 2, 0, 0, 0, -2, 0, 0], False),
+             ("jitter with one straight inserted (must not dodge)",
+                                   [1, 0, -1, 0, 1, 0, -1],      True),
+             ("JITTER",            [1, -1] * 6,                  True)]
+    rows, ok = [], True
+    for name, turns, want_fire in cases:
+        mag, rev = rates(turns)
+        fires = rev > 0.0
+        rows.append((name, mag, rev, fires, want_fire))
+        if fires != want_fire:
+            ok = False
+    if verbose:
+        print("[reversal_check] synthetic shapes")
+        print(f"  {'shape':40} {'mean magnitude':>15} {'reversal':>9}  verdict")
+        for name, mag, rev, fires, want in rows:
+            print(f"  {name:40} {mag:>15.2f} {rev:>9.2f}  "
+                  f"{'FIRES' if fires else 'silent':7} "
+                  f"({'PASS' if fires == want else 'FAIL'})")
+        print("  note: mean magnitude gives 'smooth arc' and 'JITTER' the same")
+        print("        score -- which is why sign, not magnitude, is charged.")
+    return {"rows": rows, "passed": ok}
 
 
 def zero_violation_check(cfg: Config, n_episodes: int = 100, seed: int = 0,
@@ -138,7 +191,7 @@ def zero_violation_check(cfg: Config, n_episodes: int = 100, seed: int = 0,
     spacings, survived, self_gaps, freedom = [], [], [], []
     for i in range(n_episodes):
         ed = run_random_episode(env, rng,
-                                momentum=cfg.explorer_momentum if i % 2 else 0.0)
+                                momentum=0.9 if i % 2 else 0.0)
         total_viol += ed["violations"]
         completes += int(ed["complete"])
         boxed += int(ed["boxed_in"])
@@ -172,38 +225,69 @@ def zero_violation_check(cfg: Config, n_episodes: int = 100, seed: int = 0,
 
 def reward_scale_check(cfg: Config, n_episodes: int = 8, seed: int = 1,
                        verbose: bool = True) -> Dict:
-    """DISCOUNT-AWARE. An earlier raw-sum version passed a configuration in
-    which the dense reward was worth ~1.8x the terminal reward from the
-    agent's actual point of view."""
+    """TWO tests, because the two halves of the dense layer fail differently.
+
+    1. FARMABILITY -- discounted POSITIVE dense reward vs the discounted
+       terminal base. Positive dense reward can be collected while never
+       completing an episode, so it must stay small. This is the test that
+       catches a policy farming crumbs instead of finishing.
+    2. COMPLETION DOMINANCE -- total PENALTIES vs the terminal base. Penalties
+       cannot be farmed; the only thing to do with one is avoid it by routing
+       well. The requirement is simply that completing while incurring every
+       penalty still beats failing.
+
+    A single combined test is wrong: it treats penalties as farmable and would
+    reject configurations that weight routing quality properly, for no safety
+    benefit."""
     env = RoundRobinTraceEnv(cfg, seed=seed)
     rng = np.random.default_rng(seed)
     steps = cfg.episode_steps
-    disc_terminal = cfg.w_terminal_base * (cfg.gamma ** steps)
     mean_disc = ((1 - cfg.gamma ** steps) / (steps * (1 - cfg.gamma))
                  if cfg.gamma < 1 else 1.0)
-    dense = []
+    disc_base = cfg.w_terminal_base * (cfg.gamma ** steps)
+
+    pos, neg = [], []
     for _ in range(n_episodes):
-        ed = run_random_episode(env, rng, momentum=cfg.explorer_momentum)
+        ed = run_random_episode(env, rng, momentum=0.9)
         t = ed["reward_terms"]
-        dense.append(sum(abs(t[k]) for k in t if k != "terminal") * mean_disc)
-    d = float(np.max(dense))
-    ratio = d / max(disc_terminal, 1e-9)
-    res = {"episode_steps": steps, "discounted_dense": d,
-           "discounted_terminal_base": disc_terminal, "ratio": ratio,
-           "horizon": 1.0 / (1.0 - cfg.gamma), "passed": ratio < 0.35}
+        pos.append(max(0.0, t["spacing_dense"]) * mean_disc)
+        neg.append(sum(abs(t[k]) for k in t
+                       if k not in ("terminal", "spacing_dense")))
+
+    # theoretical worst case matters more than the sampled one for penalties
+    pen_budget = (cfg.constriction_penalty_total + cfg.path_penalty_total
+                  + cfg.self_penalty_total + cfg.reversal_penalty_total
+                  + cfg.edge_penalty_total)
+    farm_ratio = float(np.max(pos)) / max(disc_base, 1e-9)
+    worst_complete = (cfg.w_terminal_base
+                      + cfg.spacing_reward_coeff * math.sqrt(cfg.endpoint_spec_mm)
+                      - pen_budget)
+
+    res = {"episode_steps": steps, "horizon": 1.0 / (1.0 - cfg.gamma),
+           "discounted_positive_dense": float(np.max(pos)),
+           "discounted_terminal_base": disc_base,
+           "farmability_ratio": farm_ratio,
+           "penalty_budget": pen_budget,
+           "worst_case_completed_score": worst_complete,
+           "sampled_penalty_max": float(np.max(neg)) if neg else 0.0,
+           "passed": farm_ratio < 0.35 and worst_complete > 0.5 * cfg.w_terminal_base}
     if verbose:
-        print(f"[reward_scale_check] discount-aware (gamma={cfg.gamma})")
-        print(f"  episode {steps} steps | planning horizon "
-              f"{res['horizon']:.0f} ({res['horizon']/steps:.1f}x episode)")
-        print(f"  discounted dense {d:.3f} vs terminal base {disc_terminal:.3f}")
-        print(f"  ratio (want < 0.35): {ratio:.3f} "
-              f"({'PASS' if res['passed'] else 'FAIL - rebalance or raise gamma'})")
+        print(f"[reward_scale_check] discount-aware (gamma={cfg.gamma}, "
+              f"{steps} steps, horizon {res['horizon']:.0f})")
+        print(f"  1. FARMABILITY  positive dense {res['discounted_positive_dense']:.3f} "
+              f"vs terminal base {disc_base:.3f} -> ratio {farm_ratio:.3f} "
+              f"(want < 0.35) {'PASS' if farm_ratio < 0.35 else 'FAIL'}")
+        print(f"  2. COMPLETION   penalty budget {pen_budget:.2f}; a barely-passing "
+              f"board still scores {worst_complete:.2f} "
+              f"{'PASS' if worst_complete > 0.5*cfg.w_terminal_base else 'FAIL - penalties too large'}")
+        print(f"     (sampled penalties actually incurred: max {res['sampled_penalty_max']:.3f})")
     return res
 
 
 def run_all(cfg: Config, n_violation_eps: int = 100, seed: int = 0) -> bool:
     checks = [self_crossing_check(cfg), self_penalty_check(cfg),
-              turn_penalty_check(cfg), zero_violation_check(cfg, n_violation_eps, seed),
+              turn_limit_check(cfg), reversal_check(cfg),
+              zero_violation_check(cfg, n_violation_eps, seed),
               reward_scale_check(cfg, seed=seed + 1)]
     ok = all(c["passed"] for c in checks)
     print(f"\n[validate] overall: {'ALL CHECKS PASSED' if ok else 'CHECKS FAILED'}")
