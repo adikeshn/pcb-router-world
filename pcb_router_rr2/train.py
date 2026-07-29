@@ -102,6 +102,13 @@ def train(cfg: Config, resume_model: Optional[str] = None) -> str:
                     progress_bar=progress)
     except KeyboardInterrupt:
         print("Interrupted - saving current model and portfolio.")
+    except Exception as exc:
+        # Save before exiting: the portfolio is the deliverable and a mid-run
+        # exception would otherwise skip every save below.
+        import traceback
+        print(f"\n*** TRAINING CRASHED: {type(exc).__name__}: {exc}")
+        traceback.print_exc()
+        print("\nSaving model and portfolio before exit.\n")
 
     model.save(os.path.join(run_dir, "model_final.zip"))
 

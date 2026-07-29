@@ -30,6 +30,23 @@ from .env import RoundRobinTraceEnv
 from .portfolio import Portfolio
 
 
+def _to_policy_device(policy, obs, action_masks=None):
+    """Build observation/mask tensors on whatever device the policy lives on.
+
+    Creating them on CPU and feeding a CUDA policy raises
+    "Expected all tensors to be on the same device". Every raw tensor built in
+    this module goes through here so there is one place to get it right --
+    SB3's own model.predict() handles this internally, but a bare policy does
+    not.
+    """
+    dev = next(policy.parameters()).device
+    t = torch.as_tensor(np.asarray(obs)).float().unsqueeze(0).to(dev)
+    mt = None
+    if action_masks is not None:
+        mt = torch.as_tensor(np.asarray(action_masks)).unsqueeze(0).to(dev)
+    return t, mt
+
+
 def run_random_episode(env: RoundRobinTraceEnv, rng: np.random.Generator,
                        momentum: float = 0.0,
                        seed: Optional[int] = None) -> Dict:
@@ -117,8 +134,7 @@ class ParameterNoiseExplorer:
                 break
             a0, _ = model.predict(obs, deterministic=True, action_masks=mask)
             with torch.no_grad():
-                t = torch.as_tensor(obs).float().unsqueeze(0)
-                mt = torch.as_tensor(mask).unsqueeze(0)
+                t, mt = _to_policy_device(clone, obs, mask)
                 dist = clone.get_distribution(t, action_masks=mt)
                 a1 = int(dist.distribution.probs.argmax())
             base_a.append(int(a0)); pert_a.append(a1)
@@ -173,8 +189,7 @@ class _PolicyWrapper:
 
     def predict(self, obs, deterministic=False, action_masks=None):
         with torch.no_grad():
-            t = torch.as_tensor(obs).float().unsqueeze(0)
-            mt = None if action_masks is None else torch.as_tensor(action_masks).unsqueeze(0)
+            t, mt = _to_policy_device(self.policy, obs, action_masks)
             dist = self.policy.get_distribution(t, action_masks=mt)
             a = dist.distribution.probs.argmax() if deterministic else dist.sample()
         return int(a), None
